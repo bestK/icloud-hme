@@ -468,9 +468,10 @@ func (c *Client) Generate() (string, error) {
 }
 
 // Reserve 保留/确认候选别名,使其正式生效。
-func (c *Client) Reserve(hme, label string) (string, error) {
+// 返回 (email, anonymousId, err),anonymousId 可能为空,由调用方兜底解析。
+func (c *Client) Reserve(hme, label string) (string, string, error) {
 	if err := c.resolveService(); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if label == "" {
 		label = "Created " + time.Now().Format("2006-01-02 15:04")
@@ -483,29 +484,35 @@ func (c *Client) Reserve(hme, label string) (string, error) {
 	}
 	body, err := c.request("POST", c.serviceURL+"/v1/hme/reserve", payload, 0, 2)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	parsed := gjson.Parse(body)
 	if !parsed.Get("success").Bool() {
 		errMsg := parsed.Get("error.errorMessage").String()
-		return "", fmt.Errorf("保留失败: %s", nonEmpty(errMsg, "unknown"))
+		return "", "", fmt.Errorf("保留失败: %s", nonEmpty(errMsg, "unknown"))
 	}
 	alias := hme
+	anonID := ""
 	resultHme := parsed.Get("result.hme")
 	if resultHme.IsObject() {
 		if v := resultHme.Get("hme").String(); v != "" {
 			alias = v
 		}
+		anonID = firstNonEmpty(resultHme.Get("anonymousId").String(), resultHme.Get("id").String())
 	}
-	c.log("已保留: %s", alias)
-	return alias, nil
+	if anonID == "" {
+		anonID = firstNonEmpty(parsed.Get("result.anonymousId").String(), parsed.Get("result.id").String())
+	}
+	c.log("已保留: %s (anonymousId=%s)", alias, anonID)
+	return alias, anonID, nil
 }
 
 // CreateResult 是 CreateAlias 的返回结果。
 type CreateResult struct {
-	Email     string `json:"email"`
-	Label     string `json:"label"`
-	CreatedAt string `json:"created_at"`
+	Email       string `json:"email"`
+	AnonymousID string `json:"anonymous_id,omitempty"`
+	Label       string `json:"label"`
+	CreatedAt   string `json:"created_at"`
 }
 
 // CreateAlias 一步完成「生成 + 保留」,创建一个新别名。
@@ -533,7 +540,7 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 			}
 			break
 		}
-		email, err := c.Reserve(hme, label)
+		email, anonID, err := c.Reserve(hme, label)
 		if err != nil {
 			lastErr = err.Error()
 			c.log("reserve 失败: %s", lastErr)
@@ -543,10 +550,22 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 			}
 			break
 		}
+		if anonID == "" {
+			// reserve 响应里没有 anonymousId,兜底从列表里按 email 匹配
+			if aliases, listErr := c.ListAliases(); listErr == nil {
+				for _, a := range aliases {
+					if a.Email == email {
+						anonID = a.AnonymousID
+						break
+					}
+				}
+			}
+		}
 		return &CreateResult{
-			Email:     email,
-			Label:     label,
-			CreatedAt: time.Now().Format(time.RFC3339),
+			Email:       email,
+			AnonymousID: anonID,
+			Label:       label,
+			CreatedAt:   time.Now().Format(time.RFC3339),
 		}, nil
 	}
 	if lastErr != "" {

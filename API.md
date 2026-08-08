@@ -14,9 +14,69 @@ HTTP JSON API，所有接口返回统一格式：
 
 **错误响应:**
 - `400 Bad Request` — 参数错误
-- `401 Unauthorized` — 会话失效
-- `404 Not Found` — 账号不存在
+- `401 Unauthorized` — 会话失效 / 缺 token / token 无效
+- `403 Forbidden` — 非 admin 尝试调用 admin only 接口
+- `404 Not Found` — 账号或别名不存在(user 尝试操作不属于自己的别名也返回 404)
 - `502 Bad Gateway` — iCloud 服务错误
+
+## 鉴权
+
+所有接口都需要在请求头带 token(择一):
+
+```http
+Authorization: Bearer <token>
+X-API-Key: <token>
+```
+
+Admin token 来自服务启动时的 `ADMIN_TOKEN` 环境变量,能调所有接口;子 token 由 admin 通过 `POST /api/tokens` 创建,只能:
+- 创建自己的 HME 别名并被统计
+- 查看/停用/激活/删除自己创建的别名
+- 读自己创建的别名的邮件(必须传 `alias`)
+
+---
+
+## 管理 API Token (admin only)
+
+### 列出所有 token
+
+```http
+GET /api/tokens
+```
+
+响应:
+```json
+{"success":true,"data":[
+  {"id":"tk_xxx","name":"laptop","role":"user","alias_count":42,
+   "created_at":"...","last_used_at":"..."}
+]}
+```
+
+`secret` 不会返回。
+
+### 创建子 token
+
+```http
+POST /api/tokens
+Content-Type: application/json
+
+{"name":"laptop"}
+```
+
+响应(仅这一次可见 secret 明文):
+```json
+{"success":true,"data":{
+  "id":"tk_xxx","name":"laptop","role":"user",
+  "secret":"<32 字节 base64url>","created_at":"..."
+}}
+```
+
+### 删除 token
+
+```http
+DELETE /api/tokens/:id
+```
+
+不允许删 admin。
 
 ---
 

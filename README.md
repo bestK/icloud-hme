@@ -12,6 +12,64 @@
 - ✅ **双路径读信** — 邮件读取优先走 IMAP (App Password),无 App Password 时回退 Web API (Cookie)
 - ✅ **多账号管理** — 支持多个 iCloud 账号并行管理
 - ✅ **双认证模式** — Cookie (创建别名 + 读邮件回退) 和 App Password (IMAP 优先)
+- ✅ **API Token 鉴权** — 一个 admin + 多个子 token,子 token 只能看到自己创建的别名,并按 token 统计使用量
+
+## 鉴权(必读)
+
+所有 `/api/*` 接口都需要鉴权,支持两种头:
+
+```http
+Authorization: Bearer <token>
+```
+
+或者:
+
+```http
+X-API-Key: <token>
+```
+
+启动服务必须通过环境变量 `ADMIN_TOKEN` 提供 admin 主 token。admin 可以调所有接口,并通过 `/api/tokens` 创建/删除子 token。子 token(role=user)只能:
+
+- 创建自己的 HME 别名(记入使用统计)
+- 看到自己名下的别名(`GET /api/aliases` 会过滤)
+- 停用/激活/删除自己名下的别名
+- 读自己名下别名的邮件(必须传 `alias` 参数)
+
+不能:调 `/api/accounts/*`、`/api/tokens/*`、`/api/reload`,以及操作不属于自己的别名(返回 404,不泄漏他人别名存在)。
+
+启动示例:
+
+```bash
+export ADMIN_TOKEN="$(openssl rand -hex 32)"
+./icloud-hme -data ./data
+```
+
+Docker Compose 里通过 `.env` 注入:
+
+```yaml
+services:
+  icloud-hme:
+    image: ghcr.io/xiaozhou26/icloud-hme:latest
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+```
+
+Admin 建子 token:
+
+```bash
+curl -X POST http://localhost:8081/api/tokens \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"laptop"}'
+# → 响应里的 data.secret 就是子 token,仅这一次返回明文,妥善保管
+```
+
+Admin 查看每个子 token 创建了多少别名:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8081/api/tokens
+# → [{id, name, role, alias_count, created_at, last_used_at}, ...]
+```
 
 ## 快速开始
 

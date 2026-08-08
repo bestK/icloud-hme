@@ -11,25 +11,28 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"icloud-hme/internal/account"
 	"icloud-hme/internal/hme"
 	"icloud-hme/internal/mail"
+	"icloud-hme/internal/token"
 )
 
-// Server 封装 Gin 引擎和账号管理器。
+// Server 封装 Gin 引擎、账号管理器与 token 存储。
 type Server struct {
-	mgr *account.Manager
-	r   *gin.Engine
+	mgr    *account.Manager
+	tokens *token.Store
+	r      *gin.Engine
 }
 
 // New 创建 Server。debug 为 true 时启用 Gin 调试日志。
-func New(mgr *account.Manager, debug bool) *Server {
+func New(mgr *account.Manager, tokens *token.Store, debug bool) *Server {
 	if !debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	s := &Server{mgr: mgr}
+	s := &Server{mgr: mgr, tokens: tokens}
 	s.r = gin.Default() // 自带 Logger + Recovery 中间件
 	s.register()
 	return s
@@ -44,31 +47,28 @@ func (s *Server) Run(addr string) error {
 func (s *Server) Handler() http.Handler { return s.r }
 
 func (s *Server) register() {
-	api := s.r.Group("/api")
-	{
-		// ===== 账号管理 =====
-		api.GET("/accounts", s.listAccounts)
-		api.POST("/accounts", s.addAccount)
-		api.DELETE("/accounts/:id", s.removeAccount)
-		api.POST("/accounts/:id/password", s.setAppPassword)
-		api.PUT("/accounts/:id/cookies", s.updateCookies)
-		api.POST("/accounts/:id/login", s.loginAccount)
+	api := s.r.Group("/api", s.authMiddleware())
 
-		// ===== 核心接口 1: 创建邮箱 =====
-		api.POST("/create", s.createAlias)
+	// admin 独占接口
+	adm := api.Group("", requireAdmin())
+	adm.GET("/accounts", s.listAccounts)
+	adm.POST("/accounts", s.addAccount)
+	adm.DELETE("/accounts/:id", s.removeAccount)
+	adm.POST("/accounts/:id/password", s.setAppPassword)
+	adm.PUT("/accounts/:id/cookies", s.updateCookies)
+	adm.POST("/accounts/:id/login", s.loginAccount)
+	adm.POST("/reload", s.reloadConfig)
+	adm.GET("/tokens", s.listTokens)
+	adm.POST("/tokens", s.createToken)
+	adm.DELETE("/tokens/:id", s.deleteToken)
 
-		// ===== 核心接口 2: 读取邮件 =====
-		api.GET("/inbox", s.listInbox)
-
-		// ===== 别名管理 =====
-		api.GET("/aliases", s.listAliases)
-		api.POST("/aliases/:id/deactivate", s.deactivateAlias)
-		api.POST("/aliases/:id/reactivate", s.reactivateAlias)
-		api.DELETE("/aliases/:id", s.deleteAlias)
-
-		// ===== 系统 =====
-		api.POST("/reload", s.reloadConfig)
-	}
+	// admin + user 都能调,内部按 role 做数据隔离
+	api.POST("/create", s.createAlias)
+	api.GET("/inbox", s.listInbox)
+	api.GET("/aliases", s.listAliases)
+	api.POST("/aliases/:id/deactivate", s.deactivateAlias)
+	api.POST("/aliases/:id/reactivate", s.reactivateAlias)
+	api.DELETE("/aliases/:id", s.deleteAlias)
 }
 
 // ---- 统一响应 ----
@@ -128,11 +128,24 @@ func (s *Server) createAlias(c *gin.Context) {
 		return
 	}
 
+	// 记录归属:非 admin 一定要绑;admin 也绑一份,便于统计
+	if tok := currentToken(c); tok != nil {
+		ref := token.AliasRef{
+			AnonymousID: result.AnonymousID,
+			Email:       result.Email,
+			Label:       result.Label,
+			AccountID:   req.AccountID,
+			CreatedAt:   time.Now(),
+		}
+		_ = s.tokens.BindAlias(tok.ID, ref)
+	}
+
 	ok(c, gin.H{
-		"email":      result.Email,
-		"label":      result.Label,
-		"created_at": result.CreatedAt,
-		"account_id": req.AccountID,
+		"email":        result.Email,
+		"anonymous_id": result.AnonymousID,
+		"label":        result.Label,
+		"created_at":   result.CreatedAt,
+		"account_id":   req.AccountID,
 	})
 }
 
@@ -157,6 +170,17 @@ func (s *Server) listInbox(c *gin.Context) {
 	alias := strings.TrimSpace(c.Query("alias"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
+
+	if !isAdmin(c) {
+		if alias == "" {
+			fail(c, http.StatusBadRequest, "非 admin 必须指定 alias")
+			return
+		}
+		if !s.tokens.HasAliasEmail(currentToken(c).ID, alias) {
+			fail(c, http.StatusNotFound, "别名不存在")
+			return
+		}
+	}
 
 	// 优先使用 IMAP (App Password 认证)
 	mc, err := s.mgr.MailClient(accountID)
@@ -353,11 +377,35 @@ func (s *Server) listAliases(c *gin.Context) {
 		}
 		return
 	}
+	if !isAdmin(c) {
+		aliases = filterAliasesByToken(aliases, s.tokens, currentToken(c).ID)
+	}
 	ok(c, gin.H{
 		"account_id": accountID,
 		"count":      len(aliases),
 		"aliases":    aliases,
 	})
+}
+
+// filterAliasesByToken 保留 token 名下的别名(按 anonymousId 或 email 匹配)。
+func filterAliasesByToken(aliases []hme.Alias, store *token.Store, tokenID string) []hme.Alias {
+	owned := make(map[string]bool)
+	ownedEmails := make(map[string]bool)
+	for _, r := range store.AliasesOf(tokenID) {
+		if r.AnonymousID != "" {
+			owned[r.AnonymousID] = true
+		}
+		if r.Email != "" {
+			ownedEmails[r.Email] = true
+		}
+	}
+	out := aliases[:0]
+	for _, a := range aliases {
+		if owned[a.AnonymousID] || ownedEmails[a.Email] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 type aliasActionReq struct {
@@ -369,6 +417,10 @@ func (s *Server) deactivateAlias(c *gin.Context) {
 	var req aliasActionReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, http.StatusBadRequest, "参数错误: account_id 必填 — "+err.Error())
+		return
+	}
+	if !isAdmin(c) && !s.tokens.HasAlias(currentToken(c).ID, anonymousID) {
+		fail(c, http.StatusNotFound, "别名不存在")
 		return
 	}
 
@@ -394,6 +446,10 @@ func (s *Server) reactivateAlias(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "参数错误: account_id 必填 — "+err.Error())
 		return
 	}
+	if !isAdmin(c) && !s.tokens.HasAlias(currentToken(c).ID, anonymousID) {
+		fail(c, http.StatusNotFound, "别名不存在")
+		return
+	}
 
 	client, err := s.mgr.HMEClient(req.AccountID, false)
 	if err != nil {
@@ -417,6 +473,11 @@ func (s *Server) deleteAlias(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "参数错误: account_id 必填 — "+err.Error())
 		return
 	}
+	tok := currentToken(c)
+	if !isAdmin(c) && !s.tokens.HasAlias(tok.ID, anonymousID) {
+		fail(c, http.StatusNotFound, "别名不存在")
+		return
+	}
 
 	client, err := s.mgr.HMEClient(req.AccountID, false)
 	if err != nil {
@@ -430,6 +491,10 @@ func (s *Server) deleteAlias(c *gin.Context) {
 		return
 	}
 	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
+	// 成功后从归属记录里移除(所有 token 都扫一遍,admin 也会解绑对应记录)
+	for _, t := range s.tokens.List() {
+		_ = s.tokens.UnbindAlias(t.ID, anonymousID)
+	}
 	ok(c, gin.H{"anonymous_id": anonymousID})
 }
 
@@ -453,3 +518,76 @@ func (s *Server) reloadConfig(c *gin.Context) {
 
 // 确保 hme 包被引用(类型在 handler 中使用)
 var _ = hme.Alias{}
+
+// ====================================================================
+// Token 管理接口 (admin only)
+// ====================================================================
+
+type tokenView struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Role       string    `json:"role"`
+	AliasCount int       `json:"alias_count"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastUsedAt time.Time `json:"last_used_at,omitempty"`
+}
+
+func toView(t *token.Token) tokenView {
+	return tokenView{
+		ID:         t.ID,
+		Name:       t.Name,
+		Role:       string(t.Role),
+		AliasCount: len(t.Aliases),
+		CreatedAt:  t.CreatedAt,
+		LastUsedAt: t.LastUsedAt,
+	}
+}
+
+func (s *Server) listTokens(c *gin.Context) {
+	all := s.tokens.List()
+	out := make([]tokenView, 0, len(all))
+	for _, t := range all {
+		out = append(out, toView(t))
+	}
+	ok(c, out)
+}
+
+type createTokenReq struct {
+	Name string `json:"name" binding:"required"`
+	Role string `json:"role"`
+}
+
+func (s *Server) createToken(c *gin.Context) {
+	var req createTokenReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "参数错误: name 必填 — "+err.Error())
+		return
+	}
+	role := token.RoleUser
+	if req.Role == string(token.RoleAdmin) {
+		fail(c, http.StatusBadRequest, "不允许通过 API 创建 admin token(用 ADMIN_TOKEN 环境变量)")
+		return
+	}
+	tk, err := s.tokens.Add(req.Name, role)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	// 创建返回包含 secret 明文(仅这一次)
+	ok(c, gin.H{
+		"id":         tk.ID,
+		"name":       tk.Name,
+		"role":       string(tk.Role),
+		"secret":     tk.Secret,
+		"created_at": tk.CreatedAt,
+	})
+}
+
+func (s *Server) deleteToken(c *gin.Context) {
+	id := c.Param("id")
+	if err := s.tokens.Delete(id); err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	ok(c, gin.H{"id": id})
+}
