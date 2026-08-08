@@ -534,6 +534,9 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 		if err != nil {
 			lastErr = "generate 失败: " + err.Error()
 			c.log("%s", lastErr)
+			if IsRateLimit(lastErr) {
+				break
+			}
 			if attempt < maxRetries-1 {
 				time.Sleep(time.Second)
 				continue
@@ -544,6 +547,10 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 		if err != nil {
 			lastErr = err.Error()
 			c.log("reserve 失败: %s", lastErr)
+			if IsRateLimit(lastErr) {
+				// iCloud 明确限流,继续重试只会加重触发。快速返回。
+				break
+			}
 			if attempt < maxRetries-1 {
 				time.Sleep(time.Second)
 				continue
@@ -727,4 +734,14 @@ func nonEmpty(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// IsRateLimit 判断错误消息是否是 iCloud 的创建速率限制。
+// 命中后调用方应快速返回,避免继续重试加重触发。
+func IsRateLimit(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "reached the limit") ||
+		strings.Contains(m, "try again later") ||
+		strings.Contains(m, "rate limit") ||
+		strings.Contains(m, "too many")
 }

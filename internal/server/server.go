@@ -118,11 +118,14 @@ func (s *Server) createAlias(c *gin.Context) {
 	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
 
 	if err != nil {
-		// 区分会话失效(需重新登录)与临时失败
+		// 区分会话失效 / 限流 / 其他错误
 		msg := err.Error()
-		if isSessionError(msg) {
+		switch {
+		case isSessionError(msg):
 			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
-		} else {
+		case hme.IsRateLimit(msg):
+			fail(c, http.StatusTooManyRequests, "iCloud 创建速率超限,请稍后重试: "+msg)
+		default:
 			fail(c, http.StatusBadGateway, "创建邮箱失败: "+msg)
 		}
 		return
