@@ -17,22 +17,25 @@ import (
 	"icloud-hme/internal/account"
 	"icloud-hme/internal/hme"
 	"icloud-hme/internal/mail"
+	"icloud-hme/internal/pool"
 	"icloud-hme/internal/token"
 )
 
-// Server 封装 Gin 引擎、账号管理器与 token 存储。
+// Server 封装 Gin 引擎、账号管理器、token 存储和暖池。
 type Server struct {
 	mgr    *account.Manager
 	tokens *token.Store
+	pool   *pool.Store
+	filler *pool.Filler
 	r      *gin.Engine
 }
 
 // New 创建 Server。debug 为 true 时启用 Gin 调试日志。
-func New(mgr *account.Manager, tokens *token.Store, debug bool) *Server {
+func New(mgr *account.Manager, tokens *token.Store, poolStore *pool.Store, filler *pool.Filler, debug bool) *Server {
 	if !debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	s := &Server{mgr: mgr, tokens: tokens}
+	s := &Server{mgr: mgr, tokens: tokens, pool: poolStore, filler: filler}
 	s.r = gin.Default() // 自带 Logger + Recovery 中间件
 	s.register()
 	return s
@@ -61,6 +64,7 @@ func (s *Server) register() {
 	adm.GET("/tokens", s.listTokens)
 	adm.POST("/tokens", s.createToken)
 	adm.DELETE("/tokens/:id", s.deleteToken)
+	adm.GET("/pool", s.listPool)
 
 	// admin + user 都能调,内部按 role 做数据隔离
 	api.POST("/create", s.createAlias)
@@ -106,6 +110,35 @@ func (s *Server) createAlias(c *gin.Context) {
 		return
 	}
 
+	// 优先从暖池 pop
+	if s.pool != nil {
+		if entry, hit := s.pool.Pop(req.AccountID); hit {
+			label := req.Label
+			if label == "" {
+				label = entry.Label
+			}
+			ref := token.AliasRef{
+				AnonymousID: entry.AnonymousID,
+				Email:       entry.Email,
+				Label:       label,
+				AccountID:   req.AccountID,
+				CreatedAt:   time.Now(),
+			}
+			if tok := currentToken(c); tok != nil {
+				_ = s.tokens.BindAlias(tok.ID, ref)
+			}
+			ok(c, gin.H{
+				"email":        entry.Email,
+				"anonymous_id": entry.AnonymousID,
+				"label":        label,
+				"created_at":   time.Now().Format(time.RFC3339),
+				"account_id":   req.AccountID,
+				"source":       "pool",
+			})
+			return
+		}
+	}
+
 	client, err := s.mgr.HMEClient(req.AccountID, false)
 	if err != nil {
 		fail(c, http.StatusNotFound, err.Error())
@@ -149,6 +182,7 @@ func (s *Server) createAlias(c *gin.Context) {
 		"label":        result.Label,
 		"created_at":   result.CreatedAt,
 		"account_id":   req.AccountID,
+		"source":       "live",
 	})
 }
 
@@ -593,4 +627,52 @@ func (s *Server) deleteToken(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"id": id})
+}
+
+// ====================================================================
+// 暖池观测接口 (admin only)
+// ====================================================================
+
+type poolView struct {
+	AccountID string `json:"account_id"`
+	Depth     int    `json:"depth"`
+	Target    int    `json:"target"`
+	HourUsed  int    `json:"hour_used"`
+	HourlyMax int    `json:"hourly_max"`
+}
+
+func (s *Server) listPool(c *gin.Context) {
+	if s.pool == nil {
+		ok(c, []poolView{})
+		return
+	}
+	target := 0
+	hourlyMax := 0
+	if s.filler != nil {
+		target = s.filler.Target()
+		hourlyMax = s.filler.HourlyMax()
+	}
+	depths := s.pool.AllDepths()
+	// 也把没有池但存在的账号显示出来
+	accs := s.mgr.ListAccounts()
+	seen := make(map[string]bool, len(depths))
+	out := make([]poolView, 0)
+	for _, acc := range accs {
+		seen[acc.ID] = true
+		out = append(out, poolView{
+			AccountID: acc.ID,
+			Depth:     depths[acc.ID],
+			Target:    target,
+			HourUsed:  s.pool.HourUsage(acc.ID),
+			HourlyMax: hourlyMax,
+		})
+	}
+	// 处理已经删除但池里还残留的账号(异常情况)
+	for id, depth := range depths {
+		if seen[id] {
+			continue
+		}
+		out = append(out, poolView{AccountID: id, Depth: depth, Target: target, HourUsed: s.pool.HourUsage(id), HourlyMax: hourlyMax})
+	}
+	ok(c, out)
 }
