@@ -1,0 +1,98 @@
+/* Element Plus 全局主题覆盖:去圆角、换字体、换主色 */
+
+:root {
+  --el-color-primary:            #1B4B8F;
+  --el-color-primary-light-3:    #4570A6;
+  --el-color-primary-light-5:    #6F91BB;
+  --el-color-primary-light-7:    #9AB3D0;
+  --el-color-primary-light-8:    #B7CADD;
+  --el-color-primary-light-9:    #D5DFEC;
+  --el-color-primary-dark-2:     #153D74;
+
+  --el-color-danger:             #C82525;
+  --el-color-danger-light-3:     #D25050;
+  --el-color-danger-light-5:     #DC7C7C;
+  --el-color-danger-light-7:     #E7A8A8;
+  --el-color-danger-light-9:     #F5DCDC;
+
+  --el-color-success:            #2F6F4E;
+
+  --el-bg-color:                 #F0EEE8;
+  --el-bg-color-page:            #F0EEE8;
+  --el-fill-color-blank:         #FAF8F2;
+  --el-fill-color-light:         #EBE7DD;
+  --el-fill-color:               #E7E2D5;
+
+  --el-text-color-primary:       #0E1A2C;
+  --el-text-color-regular:       #0E1A2C;
+  --el-text-color-secondary:     #6E6E6E;
+  --el-text-color-placeholder:   #9A968B;
+
+  --el-border-color:             #B7B2A6;
+  --el-border-color-light:       #CDC9BE;
+  --el-border-color-lighter:     #DED9CC;
+  --el-border-color-extra-light: #E9E5D9;
+
+  --el-border-radius-base:       0;
+  --el-border-radius-small:      0;
+  --el-border-radius-round:      2px;
+
+  --el-font-family:              "Inter", -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+  --el-font-size-base:           14px;
+}
+
+/* 主按钮加粗、字距略收紧 */
+.el-button--primary {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Input / Select 的圆角强制 0,ring 用深蓝 */
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  border-radius: 0 !important;
+  box-shadow: 0 0 0 1px var(--rule) inset !important;
+  &:hover { box-shadow: 0 0 0 1px var(--ink) inset !important; }
+  &.is-focus { box-shadow: 0 0 0 1px var(--primary) inset !important; }
+}
+
+/* Tag 的圆角也拿掉,风格保持一致 */
+.el-tag { border-radius: 0; }
+
+/* Card:去阴影,加档案感边框 */
+.el-card {
+  --el-card-border-color: var(--rule);
+  --el-card-bg-color: var(--paper);
+  border-radius: 0;
+  box-shadow: none !important;
+}
+
+/* Table 表头字号收紧,给档案表格感 */
+.el-table {
+  --el-table-header-bg-color: var(--bg);
+  --el-table-border-color: var(--rule);
+  --el-table-header-text-color: var(--ink);
+  font-family: var(--f-body);
+}
+.el-table th.el-table__cell {
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+/* Dialog:去圆角、加档案边框 */
+.el-dialog {
+  border-radius: 0;
+  border: 1px solid var(--rule);
+}
+.el-dialog__header {
+  padding: 20px 24px 8px;
+  border-bottom: 1px dashed var(--rule);
+}
+.el-dialog__title {
+  font-family: var(--f-display);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}

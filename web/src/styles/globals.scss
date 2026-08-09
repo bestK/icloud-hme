@@ -1,0 +1,40 @@
+@use "./tokens.scss";
+@use "./element-overrides.scss";
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #app { height: 100%; margin: 0; }
+
+body {
+  font-family: var(--f-body);
+  background: var(--bg);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss01" 1, "cv11" 1;
+}
+
+a { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+.mono { font-family: var(--f-mono); }
+.serif { font-family: var(--f-display); }
+
+.eyebrow {
+  font-family: var(--f-body);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.rule-hair { border: 0; border-top: 1px solid var(--rule); margin: 24px 0; }
+.rule-dashed { border: 0; border-top: 1px dashed var(--rule); margin: 16px 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -19,6 +19,7 @@ import (
 	"icloud-hme/internal/mail"
 	"icloud-hme/internal/pool"
 	"icloud-hme/internal/token"
+	"icloud-hme/internal/web"
 )
 
 // Server 封装 Gin 引擎、账号管理器、token 存储和暖池。
@@ -38,6 +39,7 @@ func New(mgr *account.Manager, tokens *token.Store, poolStore *pool.Store, fille
 	s := &Server{mgr: mgr, tokens: tokens, pool: poolStore, filler: filler}
 	s.r = gin.Default() // 自带 Logger + Recovery 中间件
 	s.register()
+	web.Attach(s.r) // 挂管理面板静态资源(embed)
 	return s
 }
 

@@ -1,0 +1,4 @@
+# dist 由构建阶段生成,只保留占位 index.html
+dist/*
+!dist/.gitkeep
+!dist/index.html
