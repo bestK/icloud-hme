@@ -68,6 +68,30 @@ export async function probeRole(): Promise<Role> {
 export const api = {
   listAccounts: async () => unwrap<Account[]>((await http.get('/accounts')).data),
 
+  addAccount: async (payload: { name: string; cookies?: string; host?: string; proxy?: string }) =>
+    unwrap<Account>((await http.post('/accounts', payload)).data),
+
+  removeAccount: async (id: string) =>
+    unwrap<{ id: string }>((await http.delete(`/accounts/${id}`)).data),
+
+  updateCookies: async (id: string, cookies: Record<string, string>) =>
+    unwrap<{ id: string; cookies_count: number }>(
+      (await http.put(`/accounts/${id}/cookies`, { cookies })).data,
+    ),
+
+  loginAccount: async (id: string, password: string, otpCode?: string) =>
+    unwrap<{ id: string; cookies: Record<string, string> }>(
+      (await http.post(`/accounts/${id}/login`, { password, otp_code: otpCode })).data,
+    ),
+
+  setAppPassword: async (id: string, icloud_email: string, app_password: string) =>
+    unwrap<{ id: string; icloud_email: string }>(
+      (await http.post(`/accounts/${id}/password`, { icloud_email, app_password })).data,
+    ),
+
+  reload: async () => unwrap<{ message: string }>((await http.post('/reload')).data),
+
+
   listPool: async () => unwrap<PoolView[]>((await http.get('/pool')).data),
 
   listTokens: async () => unwrap<TokenView[]>((await http.get('/tokens')).data),

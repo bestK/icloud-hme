@@ -7,6 +7,7 @@ const auth = useAuthStore()
 interface NavItem { path: string; label: string; hint: string; adminOnly?: boolean }
 const nav: NavItem[] = [
   { path: '/overview', label: '总览',   hint: 'OVERVIEW', adminOnly: true },
+  { path: '/accounts', label: '账号',   hint: 'ACCOUNTS', adminOnly: true },
   { path: '/aliases',  label: '别名',   hint: 'ALIASES' },
   { path: '/inbox',    label: '收件箱', hint: 'INBOX' },
   { path: '/tokens',   label: '令牌',   hint: 'TOKENS', adminOnly: true },

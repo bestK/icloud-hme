@@ -6,6 +6,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/', redirect: () => (useAuthStore().isAdmin ? '/overview' : '/aliases') },
   { path: '/overview', component: () => import('@/views/OverviewView.vue'), meta: { admin: true } },
   { path: '/tokens', component: () => import('@/views/TokensView.vue'), meta: { admin: true } },
+  { path: '/accounts', component: () => import('@/views/AccountsView.vue'), meta: { admin: true } },
   { path: '/aliases', component: () => import('@/views/AliasesView.vue') },
   { path: '/inbox', component: () => import('@/views/InboxView.vue') },
   { path: '/:pathMatch(.*)*', component: () => import('@/views/NotFoundView.vue'), meta: { public: true } },
