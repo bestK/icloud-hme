@@ -55,30 +55,24 @@ func NewWebClient(cookies map[string]string, dsid, host string) *WebClient {
 		httpc:    httpc,
 	}
 
-	// 设置 Cookie 到所有相关域名(确保跨域请求能传递 Cookie)
+	// 设置 Cookie 到基础域名,并显式指定 Domain,让所有子域(setup/www/pXX-mccgateway/pXX-mailws 等)都能带上。
+	// 早先硬编码 p217 的实现在账号分片到其它 pod(如 p169)时会漏发 Cookie 导致 401。
 	if len(cookies) > 0 {
 		suffix := "icloud.com"
 		if host == "icloud.com.cn" {
 			suffix = "icloud.com.cn"
 		}
-		domains := []string{
-			"https://setup." + suffix,
-			"https://www." + suffix,
-			"https://p217-mccgateway." + suffix,
-			"https://p217-maildomainws." + suffix,
+		u, _ := url.Parse("https://www." + suffix)
+		httpCookies := make([]*http.Cookie, 0, len(cookies))
+		for k, v := range cookies {
+			httpCookies = append(httpCookies, &http.Cookie{
+				Name:   k,
+				Value:  v,
+				Path:   "/",
+				Domain: suffix,
+			})
 		}
-		for _, domain := range domains {
-			u, _ := url.Parse(domain)
-			httpCookies := make([]*http.Cookie, 0, len(cookies))
-			for k, v := range cookies {
-				httpCookies = append(httpCookies, &http.Cookie{
-					Name:  k,
-					Value: v,
-					Path:  "/",
-				})
-			}
-			jar.SetCookies(u, httpCookies)
-		}
+		jar.SetCookies(u, httpCookies)
 	}
 
 	return c
