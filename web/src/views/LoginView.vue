@@ -31,14 +31,11 @@ async function submit() {
 
 <template>
   <div class="page">
-    <div class="stamp-frame">
-      <div class="postmark">POST · REGISTRY</div>
-      <div class="corner">Nº HME · 001</div>
-
+    <div class="login-card">
       <div class="title">
         <div class="eyebrow">iCLOUD · HIDE MY EMAIL</div>
-        <h1>档案登录</h1>
-        <p class="sub">粘贴 admin 或子 token,凭它进入档案库。</p>
+        <h1>登录</h1>
+        <p class="sub">粘贴 admin token 或子 token。</p>
       </div>
 
       <el-input
@@ -50,12 +47,12 @@ async function submit() {
         size="large"
       />
       <el-button type="primary" size="large" class="submit" :loading="loading" @click="submit">
-        进入档案
+        登录
       </el-button>
 
       <hr class="rule-dashed" />
       <div class="hint">
-        没有 token 时,联系 admin 通过 <span class="mono">POST /api/tokens</span> 签发一枚。
+        没有 token 时,联系 admin 通过 <span class="mono">POST /api/tokens</span> 创建一个。
       </div>
     </div>
   </div>
@@ -73,14 +70,14 @@ async function submit() {
     radial-gradient(circle at 100% 100%, rgba(200, 37, 37, 0.05) 0%, transparent 40%),
     var(--bg);
 }
-.stamp-frame {
+.login-card {
   position: relative;
   width: 480px;
   max-width: 100%;
   background: var(--paper);
   border: 1px solid var(--ink);
   padding: 40px 40px 32px;
-  /* 邮票齿边 SVG mask */
+  /* 上下边缘齿孔:纯装饰 */
   &::before, &::after {
     content: '';
     position: absolute;
@@ -93,27 +90,7 @@ async function submit() {
   &::before { top: -4px; }
   &::after { bottom: -4px; background-position: 0 0; }
 }
-.postmark {
-  position: absolute;
-  top: 12px; right: -16px;
-  transform: rotate(8deg);
-  border: 2px solid var(--stamp);
-  color: var(--stamp);
-  padding: 6px 12px;
-  font-family: var(--f-body);
-  font-size: 10px;
-  letter-spacing: 0.24em;
-  background: var(--paper);
-}
-.corner {
-  position: absolute;
-  top: 14px; left: 20px;
-  font-family: var(--f-mono);
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  color: var(--dim);
-}
-.title { margin: 32px 0 24px; }
+.title { margin: 0 0 24px; }
 .title h1 {
   font-family: var(--f-display);
   font-weight: 700;

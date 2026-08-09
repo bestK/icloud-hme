@@ -22,7 +22,7 @@ async function load() {
     messages.value = r.messages || []
     method.value = r.method
   } catch (e: any) {
-    ElMessage.error(e?.message || '读信失败')
+    ElMessage.error(e?.message || '读取失败')
     messages.value = []
   } finally {
     loading.value = false
@@ -44,7 +44,7 @@ onMounted(load)
   <section class="page">
     <div class="masthead">
       <div class="eyebrow">收件箱 · INBOX</div>
-      <h1>寄给你的信</h1>
+      <h1>别名收件箱</h1>
       <div class="filter">
         <el-input v-model="accountId" placeholder="account_id" style="width: 240px" />
         <el-input v-model="alias" placeholder="alias@icloud.com" style="width: 320px" @keyup.enter="apply" />
@@ -53,17 +53,17 @@ onMounted(load)
       </div>
     </div>
 
-    <div v-if="loading" class="empty">正在从邮箱抓取…</div>
+    <div v-if="loading" class="empty">正在读取邮件…</div>
     <div v-else-if="!alias" class="empty">
-      <div class="empty-mark">EMPTY BOX</div>
-      <p>填一个 alias 地址,查一遍它收到的信。</p>
+      <div class="status-mark">未选择别名</div>
+      <p>填一个别名地址,查看它收到的邮件。</p>
     </div>
     <div v-else-if="!messages.length" class="empty">
-      <div class="empty-mark">EMPTY BOX</div>
+      <div class="status-mark">暂无邮件</div>
       <p>{{ alias }} 目前没有邮件。</p>
     </div>
-    <ul v-else class="letters">
-      <li v-for="m in messages" :key="m.id" class="letter">
+    <ul v-else class="messages">
+      <li v-for="m in messages" :key="m.id" class="message">
         <div class="from">
           <span class="eyebrow">来自</span>
           <span class="mono">{{ m.from }}</span>
@@ -100,17 +100,18 @@ onMounted(load)
   color: var(--dim);
   background: var(--paper);
 }
-.empty-mark {
+.status-mark {
   display: inline-block;
   border: 2px solid var(--dim);
   padding: 4px 12px;
-  font-size: 11px;
-  letter-spacing: 0.24em;
+  font-size: 12px;
+  /* 中文,字距从 0.24em 收到 0.08em */
+  letter-spacing: 0.08em;
   margin-bottom: 12px;
 }
 
-.letters { list-style: none; margin: 0; padding: 0; }
-.letter {
+.messages { list-style: none; margin: 0; padding: 0; }
+.message {
   border-bottom: 1px dashed var(--rule);
   padding: 18px 0;
   &:first-child { border-top: 1px dashed var(--rule); }

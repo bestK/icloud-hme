@@ -29,11 +29,11 @@ onMounted(load)
 <template>
   <section class="page">
     <div class="masthead">
-      <div class="eyebrow">档案总览 · OVERVIEW</div>
-      <h1>本日邮政日报</h1>
+      <div class="eyebrow">总览 · OVERVIEW</div>
+      <h1>运行状态</h1>
       <div class="sub">
-        {{ accounts.length }} 个 iCloud 账号 · {{ tokens.length }} 个已签发 token ·
-        {{ pools.reduce((s, p) => s + p.depth, 0) }} 张邮票在库
+        {{ accounts.length }} 个 iCloud 账号 · {{ tokens.length }} 个 token ·
+        地址池中 {{ pools.reduce((s, p) => s + p.depth, 0) }} 个待用别名
       </div>
     </div>
 
@@ -74,7 +74,7 @@ onMounted(load)
             </div>
             <div class="row-side big">
               <span class="digit">{{ t.alias_count }}</span>
-              <span class="unit">邮票</span>
+              <span class="unit">别名</span>
             </div>
           </li>
         </ul>
@@ -91,7 +91,11 @@ onMounted(load)
   font-family: var(--f-display); font-weight: 700;
   font-size: 44px; letter-spacing: -0.02em; margin: 6px 0 6px;
 }
-.masthead .sub { color: var(--dim); font-size: 13px; }
+.masthead .sub {
+  color: var(--dim); font-size: 13px;
+  /* 三个计数在加载完成后会变,等宽数字避免整行回流 */
+  font-variant-numeric: tabular-nums;
+}
 
 .stack { display: grid; gap: 20px; }
 
@@ -121,7 +125,7 @@ onMounted(load)
   padding: 2px 8px; border: 1px solid var(--rule); color: var(--ink);
   text-transform: uppercase;
   &.active { border-color: var(--ok); color: var(--ok); }
-  &.error { border-color: var(--stamp); color: var(--stamp); }
+  &.error { border-color: var(--accent); color: var(--accent); }
   &.pending { border-color: var(--dim); color: var(--dim); }
 }
 .row-side { display: flex; align-items: center; gap: 12px; }
@@ -129,7 +133,7 @@ onMounted(load)
 .digit {
   font-family: var(--f-display); font-weight: 700; font-size: 28px;
   line-height: 1; color: var(--ink);
-  font-feature-settings: "tnum" 1, "lnum" 1;
+  font-variant-numeric: tabular-nums lining-nums;
 }
 .unit { font-size: 10px; letter-spacing: 0.2em; color: var(--dim); text-transform: uppercase; }
 </style>

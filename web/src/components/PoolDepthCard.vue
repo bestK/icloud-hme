@@ -33,24 +33,24 @@ watch(
 
 <template>
   <div class="card">
-    <svg class="perf" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+    <svg class="frame" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
       <rect x="0.5" y="0.5" width="99" height="99" fill="none" stroke="var(--rule)" stroke-width="0.5" stroke-dasharray="1.5 1.5"/>
     </svg>
 
-    <div class="corner">Nº {{ view.account_id.replace('acc_', '').toUpperCase() }}</div>
-    <div class="label">POOL DEPTH</div>
+    <div class="acct-tag">ACCT · {{ view.account_id.replace('acc_', '').toUpperCase() }}</div>
+    <div class="label">地址池深度</div>
     <div class="number">
       <span class="digits">{{ String(displayed).padStart(2, '0') }}</span>
-      <span class="of">/ {{ view.target }} target</span>
+      <span class="of">/ {{ view.target }} 目标</span>
     </div>
 
     <div class="side">
       <div class="side-row">
-        <span class="k">hour used</span>
+        <span class="k">本小时已用</span>
         <span class="v mono">{{ view.hour_used }} / {{ view.hourly_max }}</span>
       </div>
       <div class="side-row">
-        <span class="k">account</span>
+        <span class="k">账号</span>
         <span class="v mono">{{ view.account_id }}</span>
       </div>
     </div>
@@ -70,7 +70,7 @@ watch(
   overflow: hidden;
   isolation: isolate;
 
-  /* 邮票齿边 SVG mask */
+  /* 边缘齿孔:纯装饰 */
   --p: 6px;
   mask-image:
     radial-gradient(circle at center, transparent 3px, black 3.5px) 0 -6px / 12px 12px,
@@ -80,14 +80,14 @@ watch(
     linear-gradient(black, black);
   mask-composite: intersect;
 }
-.perf { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; opacity: 0.4; }
-.corner {
+.frame { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; opacity: 0.4; }
+.acct-tag {
   position: absolute; top: 12px; right: 16px;
   font-family: var(--f-mono); font-size: 10px; letter-spacing: 0.16em; color: var(--dim);
 }
+/* 中文标题:0.24em 字距 + uppercase 是给英文的,这里收掉 */
 .label {
-  font-family: var(--f-body); font-size: 11px; letter-spacing: 0.24em; color: var(--dim);
-  text-transform: uppercase;
+  font-family: var(--f-body); font-size: 12px; letter-spacing: 0.08em; color: var(--dim);
 }
 .number { line-height: 1; margin-top: 8px; }
 .digits {
@@ -95,8 +95,8 @@ watch(
   font-size: 120px;
   letter-spacing: -0.04em;
   color: var(--ink);
-  font-feature-settings: "tnum" 1, "lnum" 1;
-  border-bottom: 4px solid var(--stamp);
+  font-variant-numeric: tabular-nums lining-nums;
+  border-bottom: 4px solid var(--accent);
   padding-bottom: 4px;
 }
 .of {
@@ -115,7 +115,8 @@ watch(
 }
 .side-row {
   display: flex; justify-content: space-between; gap: 12px;
-  .k { color: var(--dim); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; }
+  /* 同上:键名改中文后去掉 uppercase 与宽字距 */
+  .k { color: var(--dim); font-size: 12px; letter-spacing: 0.04em; }
   .v { font-size: 12px; color: var(--ink); }
 }
 

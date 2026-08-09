@@ -29,12 +29,11 @@ const items = computed(() => nav.filter((n) => !n.adminOnly || auth.isAdmin))
         </li>
       </ul>
     </div>
-    <div class="section footer">
-      <div class="section-label">档案 / RECORD</div>
-      <div class="stamp">
+    <div class="footer">
+      <div class="brand-mark">
         <svg viewBox="0 0 100 60" width="100%">
-          <rect x="4" y="4" width="92" height="52" fill="none" stroke="var(--rule)" stroke-dasharray="3 3"/>
-          <text x="50" y="34" text-anchor="middle" font-family="Fraunces, serif" font-size="14" fill="var(--dim)">HME · REGISTRY</text>
+          <rect x="4" y="4" width="92" height="52" fill="none" stroke="currentColor" stroke-dasharray="3 3"/>
+          <text x="50" y="34" text-anchor="middle" font-family="Fraunces, serif" font-size="14" fill="currentColor">iCLOUD · HME</text>
         </svg>
       </div>
     </div>
@@ -67,12 +66,18 @@ ul { list-style: none; margin: 0; padding: 0; }
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  min-height: var(--hit);
   padding: 10px 8px;
   color: var(--ink);
   border-left: 2px solid transparent;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
   &:hover { background: var(--bg); text-decoration: none; }
+  &:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
   &.active {
-    border-left-color: var(--stamp);
+    border-left-color: var(--accent);
     background: var(--bg);
   }
   .hint {
@@ -86,7 +91,7 @@ ul { list-style: none; margin: 0; padding: 0; }
     font-weight: 500;
     font-size: 15px;
   }
-  &.active .label { color: var(--stamp); }
+  &.active .label { color: var(--accent); }
 }
 
 .footer { margin-top: auto; opacity: 0.75; }
@@ -104,8 +109,15 @@ ul { list-style: none; margin: 0; padding: 0; }
   }
   .section-label, .footer { display: none; }
   ul { display: flex; gap: 8px; }
-  .item { padding: 6px 10px; border-left: 0; border-bottom: 2px solid transparent; }
-  .item.active { border-bottom-color: var(--stamp); }
+  .item {
+    /* 移动端是触控,给到 44px */
+    min-height: var(--hit-touch);
+    align-items: center;
+    padding: 6px 12px;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+  .item.active { border-bottom-color: var(--accent); }
   .item .hint { display: none; }
 }
 </style>

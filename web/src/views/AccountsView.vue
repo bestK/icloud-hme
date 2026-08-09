@@ -51,7 +51,7 @@ async function submitAdd() {
       host: addForm.value.host.trim() || undefined,
       proxy: addForm.value.proxy.trim() || undefined,
     })
-    ElMessage.success('已登记')
+    ElMessage.success('已添加')
     addOpen.value = false
     addForm.value = { name: '', cookies: '', host: 'icloud.com', proxy: '' }
     await load()
@@ -159,14 +159,14 @@ async function submitApp() {
 
 async function remove(a: Account) {
   try {
-    await ElMessageBox.confirm(`确定注销账号 "${a.name}" (${a.id}) ?`, '注销确认', { type: 'warning' })
+    await ElMessageBox.confirm(`确定删除账号 "${a.name}" (${a.id}) ?`, '删除账号', { type: 'warning' })
   } catch { return }
   try {
     await api.removeAccount(a.id)
-    ElMessage.success('已注销')
+    ElMessage.success('已删除')
     await load()
   } catch (e: any) {
-    ElMessage.error(e?.message || '注销失败')
+    ElMessage.error(e?.message || '删除失败')
   }
 }
 
@@ -183,18 +183,23 @@ onMounted(load)
       <div class="row">
         <div>
           <div class="eyebrow">账号 · ACCOUNTS</div>
-          <h1>iCloud 账号档案</h1>
+          <h1>iCloud 账号</h1>
         </div>
-        <el-button type="primary" @click="addOpen = true">+ 登记新账号</el-button>
+        <el-button type="primary" @click="addOpen = true">+ 添加账号</el-button>
       </div>
       <div class="sub">Cookie 大约 24 小时轮换 · 失效后重新粘贴或用密码登录</div>
     </div>
 
-    <el-table :data="accounts" v-loading="loading" empty-text="尚未登记 iCloud 账号">
+    <el-table :data="accounts" v-loading="loading" empty-text="还没有 iCloud 账号">
       <el-table-column label="名称" prop="name" min-width="140">
         <template #default="{ row }">
           <div class="row-name">{{ row.name }}</div>
-          <div class="row-id mono" @click="copyId(row.id)">{{ row.id }}</div>
+          <button
+            class="row-id mono copyable"
+            type="button"
+            :title="`复制 ${row.id}`"
+            @click="copyId(row.id)"
+          >{{ row.id }}</button>
         </template>
       </el-table-column>
       <el-table-column label="邮箱" min-width="220">
@@ -208,10 +213,10 @@ onMounted(load)
           <span class="chip" :class="row.status">{{ row.status }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="别名" width="90" align="right">
+      <el-table-column label="别名" width="96" align="right">
         <template #default="{ row }">
           <span class="num">{{ row.alias_total }}</span>
-          <div class="small dim">active {{ row.alias_active }}</div>
+          <div class="small dim">启用 {{ row.alias_active }}</div>
         </template>
       </el-table-column>
       <el-table-column label="上次校验" min-width="170">
@@ -223,18 +228,21 @@ onMounted(load)
           <div v-if="row.last_error" class="warn small">{{ row.last_error }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="290" align="right">
+      <el-table-column label="操作" width="340" align="right">
         <template #default="{ row }">
-          <el-button link type="primary" size="small" @click="openCookies(row)">贴 Cookie</el-button>
-          <el-button link size="small" @click="openLogin(row)">密码登录</el-button>
-          <el-button link size="small" @click="openApp(row)">App Password</el-button>
-          <el-button link type="danger" size="small" @click="remove(row)">注销</el-button>
+          <div class="acts">
+            <el-button link type="primary" size="small" @click="openCookies(row)">更新 Cookie</el-button>
+            <el-button link size="small" @click="openLogin(row)">密码登录</el-button>
+            <el-button link size="small" @click="openApp(row)">App Password</el-button>
+            <span class="sep" aria-hidden="true" />
+            <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>
 
     <!-- 新增账号 -->
-    <el-dialog v-model="addOpen" title="登记新账号" width="520px">
+    <el-dialog v-model="addOpen" title="添加 iCloud 账号" width="520px">
       <el-form label-position="top">
         <el-form-item label="名称">
           <el-input v-model="addForm.name" placeholder="主号 / 副号 / 项目名" />
@@ -256,7 +264,7 @@ onMounted(load)
       </el-form>
       <template #footer>
         <el-button plain @click="addOpen = false">取消</el-button>
-        <el-button type="primary" :loading="addLoading" @click="submitAdd">登记</el-button>
+        <el-button type="primary" :loading="addLoading" @click="submitAdd">添加</el-button>
       </template>
     </el-dialog>
 
@@ -264,7 +272,7 @@ onMounted(load)
     <el-dialog v-model="ckOpen" width="600px">
       <template #header>
         <div>
-          <div class="eyebrow">贴 Cookie</div>
+          <div class="eyebrow">更新 Cookie</div>
           <div class="dialog-title">{{ ckAcc?.name }} · {{ ckAcc?.id }}</div>
         </div>
       </template>
@@ -353,20 +361,45 @@ onMounted(load)
 
 .row-name { font-family: var(--f-display); font-weight: 500; font-size: 15px; }
 .row-id {
-  color: var(--dim); font-size: 11px; margin-top: 2px; cursor: pointer;
-  &:hover { color: var(--primary); }
+  display: block;
+  color: var(--dim); font-size: 11px; margin-top: 2px;
+}
+
+/* 行内操作:每个到 40px,"删除"前加竖线,窄屏允许换行 */
+.acts {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
+  :deep(.el-button.is-link) {
+    min-height: var(--hit);
+    padding: 0 8px;
+    margin-left: 0;
+  }
+}
+.sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--rule);
+  flex: none;
 }
 .chip {
   font-family: var(--f-mono); font-size: 10px; letter-spacing: 0.14em;
   padding: 2px 8px; border: 1px solid var(--rule); text-transform: uppercase;
   &.active { border-color: var(--ok); color: var(--ok); }
-  &.error { border-color: var(--stamp); color: var(--stamp); }
+  &.error { border-color: var(--accent); color: var(--accent); }
   &.pending { border-color: var(--dim); color: var(--dim); }
 }
-.num { font-family: var(--f-display); font-weight: 700; font-size: 20px; }
-.small { font-size: 10px; letter-spacing: 0.06em; }
+.num {
+  font-family: var(--f-display); font-weight: 700; font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+/* 10px 带中文读不清,给到 11px */
+.small { font-size: 11px; letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
 .dim { color: var(--dim); }
-.warn { color: var(--stamp); }
+.warn { color: var(--accent); }
 
 .eyebrow { font-size: 10px; }
 .dialog-title {

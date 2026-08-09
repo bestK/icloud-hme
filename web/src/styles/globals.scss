@@ -12,13 +12,44 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "ss01" 1, "cv11" 1;
+  text-wrap: pretty;
 }
+
+/* 标题走 balance,避免最后一行掉单字 */
+h1, h2, h3 { text-wrap: balance; }
 
 a { color: var(--primary); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 2px; }
 
 .mono { font-family: var(--f-mono); }
 .serif { font-family: var(--f-display); }
+
+/* 会变的数字一律等宽,避免刷新时抖动 */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* 点一下复制 —— 必须是 <button>,span 拿不到键盘焦点 */
+.copyable {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  text-align: inherit;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+  &:hover {
+    color: var(--primary);
+    /* 颜色之外再给一条静态线索,不依赖辨色 */
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+  }
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
 
 .eyebrow {
   font-family: var(--f-body);

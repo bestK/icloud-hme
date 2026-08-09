@@ -1,15 +1,15 @@
-/* Design tokens — 邮政档案 */
+/* Design tokens */
 
 :root {
-  --bg:      #F0EEE8;   /* 信纸底色 */
+  --bg:      #F0EEE8;   /* 页面底色 */
   --paper:   #FAF8F2;   /* 卡片底色 */
-  --ink:     #0E1A2C;   /* 深邮政蓝文字 */
-  --rule:    #B7B2A6;   /* 分割线 / 齿边虚线 */
-  --primary: #1B4B8F;   /* 主钮蓝 */
+  --ink:     #0E1A2C;   /* 正文 */
+  --rule:    #B7B2A6;   /* 分割线 / 边框 */
+  --primary: #1B4B8F;   /* 主操作 */
   --primary-2:#153D74;
-  --stamp:   #C82525;   /* 盖章红 */
+  --accent:  #C82525;   /* 强调:激活态 / 危险操作 / 错误 */
   --dim:     #6E6E6E;   /* 辅助文本 */
-  --ok:      #2F6F4E;   /* 状态成功 */
+  --ok:      #2F6F4E;   /* 成功 */
 
   --f-display: "Fraunces", Georgia, "Times New Roman", serif;
   --f-body:    "Inter", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -17,4 +17,13 @@
 
   --shadow-1: 0 1px 0 rgba(14, 26, 44, 0.06);
   --shadow-card: 0 6px 24px -12px rgba(14, 26, 44, 0.25);
+
+  /* 动效:交互态一律用 --ease-out,时长不超过 150ms */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 120ms;
+  --dur: 150ms;
+
+  /* 触控/密集桌面 UI 的最小点击区 */
+  --hit: 40px;
+  --hit-touch: 44px;
 }

@@ -5,11 +5,11 @@ const router = useRouter()
 
 <template>
   <div class="page">
-    <div class="ticket">
-      <div class="mark">RETURN TO SENDER</div>
-      <h1>查无此件</h1>
-      <p>你访问的地址在档案库中没有登记。</p>
-      <button class="back" @click="router.push('/')">回到大厅</button>
+    <div class="card">
+      <div class="code">404</div>
+      <h1>页面不存在</h1>
+      <p>这个地址没有对应的页面。</p>
+      <button class="back" @click="router.push('/')">返回首页</button>
     </div>
   </div>
 </template>
@@ -22,33 +22,41 @@ const router = useRouter()
   justify-content: center;
   background: var(--bg);
 }
-.ticket {
+.card {
   border: 1px dashed var(--ink);
   padding: 40px 60px;
   background: var(--paper);
   text-align: center;
   position: relative;
 }
-.mark {
-  border: 2px solid var(--stamp);
-  color: var(--stamp);
+.code {
+  border: 2px solid var(--accent);
+  color: var(--accent);
   display: inline-block;
   padding: 4px 12px;
-  font-size: 11px;
-  letter-spacing: 0.24em;
-  transform: rotate(-4deg);
+  font-family: var(--f-mono);
+  font-size: 12px;
+  letter-spacing: 0.14em;
   margin-bottom: 16px;
 }
 h1 { font-family: var(--f-display); font-size: 42px; margin: 0 0 8px; }
 p { color: var(--dim); }
 .back {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: var(--hit);
   margin-top: 16px;
   background: var(--ink);
   color: var(--paper);
   border: none;
-  padding: 10px 20px;
+  padding: 10px 22px;
   cursor: pointer;
   font-family: var(--f-body);
   letter-spacing: 0.08em;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    scale var(--dur-fast) var(--ease-out);
+  &:hover { background: var(--primary); }
+  &:active { scale: 0.96; }
+  &:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 }
 </style>

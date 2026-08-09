@@ -14,13 +14,13 @@ function logout() {
 <template>
   <header class="hdr">
     <div class="brand">
-      <svg class="stamp" viewBox="0 0 32 32" aria-hidden="true">
-        <rect x="3" y="3" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 2"/>
-        <text x="16" y="21" text-anchor="middle" font-family="Fraunces, serif" font-size="14" font-weight="700" fill="var(--stamp)">H</text>
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="3" y="3" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.75" stroke-dasharray="2 2" vector-effect="non-scaling-stroke"/>
+        <text x="16" y="21" text-anchor="middle" font-family="Fraunces, serif" font-size="14" font-weight="700" fill="var(--accent)">H</text>
       </svg>
       <div class="wordmark">
-        <div class="line-1">iCLOUD · HME</div>
-        <div class="line-2">Registry</div>
+        <div class="line-1">iCLOUD</div>
+        <div class="line-2">Hide My Email</div>
       </div>
     </div>
     <div class="meta">
@@ -43,7 +43,7 @@ function logout() {
   background: var(--paper);
 }
 .brand { display: flex; align-items: center; gap: 14px; color: var(--ink); }
-.stamp { width: 36px; height: 36px; color: var(--primary); }
+.logo { width: 36px; height: 36px; color: var(--primary); }
 .wordmark .line-1 {
   font-family: var(--f-body);
   font-size: 11px;
@@ -52,7 +52,8 @@ function logout() {
 }
 .wordmark .line-2 {
   font-family: var(--f-display);
-  font-size: 22px;
+  /* "Hide My Email" 比原来的 "Registry" 长,22px 会挤到 role 徽标 */
+  font-size: 19px;
   font-weight: 700;
   line-height: 1;
   letter-spacing: -0.01em;
@@ -70,21 +71,31 @@ function logout() {
   letter-spacing: 0.1em;
   color: var(--ink);
   background: var(--bg);
-  &.admin .dot { background: var(--stamp); }
+  &.admin .dot { background: var(--accent); }
   &.user .dot { background: var(--primary); }
 }
 .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); display: inline-block; }
 
 .logout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--hit);
   background: transparent;
   border: 1px solid var(--ink);
   color: var(--ink);
-  padding: 6px 14px;
+  padding: 6px 16px;
   font-family: var(--f-body);
   font-size: 12px;
   letter-spacing: 0.08em;
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    scale var(--dur-fast) var(--ease-out);
   &:hover { background: var(--ink); color: var(--paper); }
+  &:active { scale: 0.96; }
+  &:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 }
 
 @media (max-width: 720px) {

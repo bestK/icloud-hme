@@ -47,20 +47,39 @@
   letter-spacing: 0.01em;
 }
 
+/* EP 自带 `transition: all .1s`,换成只跟颜色相关的属性 */
+.el-button {
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    scale var(--dur-fast) var(--ease-out);
+  &:not(.is-disabled):not(.is-loading):active { scale: 0.96; }
+}
+/* link 型按钮是表格里的行内操作,缩放会带着整行抖,只留颜色 */
+.el-button.is-link:active { scale: 1; }
+
 /* Input / Select 的圆角强制 0,ring 用深蓝 */
 .el-input__wrapper,
 .el-textarea__inner,
 .el-select__wrapper {
   border-radius: 0 !important;
   box-shadow: 0 0 0 1px var(--rule) inset !important;
+  transition: box-shadow var(--dur-fast) var(--ease-out);
   &:hover { box-shadow: 0 0 0 1px var(--ink) inset !important; }
-  &.is-focus { box-shadow: 0 0 0 1px var(--primary) inset !important; }
+  &.is-focus { box-shadow: 0 0 0 2px var(--primary) inset !important; }
+}
+/* 键盘 focus 时 ring 加粗到 2px,1px 在这个底色上太弱 */
+.el-input__wrapper:has(:focus-visible),
+.el-textarea__inner:focus-visible {
+  box-shadow: 0 0 0 2px var(--primary) inset !important;
 }
 
 /* Tag 的圆角也拿掉,风格保持一致 */
 .el-tag { border-radius: 0; }
 
-/* Card:去阴影,加档案感边框 */
+/* Card:去阴影,用 1px 边框界定边界 */
 .el-card {
   --el-card-border-color: var(--rule);
   --el-card-bg-color: var(--paper);
@@ -68,7 +87,7 @@
   box-shadow: none !important;
 }
 
-/* Table 表头字号收紧,给档案表格感 */
+/* Table:表头与正文拉开层级 */
 .el-table {
   --el-table-header-bg-color: var(--bg);
   --el-table-border-color: var(--rule);
@@ -77,12 +96,13 @@
 }
 .el-table th.el-table__cell {
   font-weight: 600;
-  letter-spacing: 0.06em;
+  /* 表头是中文,11px + 0.06em 字距读起来发糊,给到 12px 并收字距 */
+  font-size: 12px;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  font-size: 11px;
 }
 
-/* Dialog:去圆角、加档案边框 */
+/* Dialog:去圆角,与卡片同一套边框 */
 .el-dialog {
   border-radius: 0;
   border: 1px solid var(--rule);

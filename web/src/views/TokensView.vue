@@ -39,7 +39,7 @@ async function issue() {
     revealOpen.value = true
     await load()
   } catch (e: any) {
-    ElMessage.error(e?.message || '签发失败')
+    ElMessage.error(e?.message || '创建失败')
   } finally {
     issuing.value = false
   }
@@ -51,16 +51,16 @@ async function remove(t: TokenView) {
     return
   }
   try {
-    await ElMessageBox.confirm(`确定作废 token "${t.name}" (${t.id})?`, '作废确认', {
+    await ElMessageBox.confirm(`确定删除 token "${t.name}" (${t.id})?`, '删除 token', {
       type: 'warning',
     })
   } catch { return }
   try {
     await api.deleteToken(t.id)
-    ElMessage.success('已作废')
+    ElMessage.success('已删除')
     await load()
   } catch (e: any) {
-    ElMessage.error(e?.message || '作废失败')
+    ElMessage.error(e?.message || '删除失败')
   }
 }
 
@@ -80,10 +80,10 @@ onMounted(load)
     <div class="masthead">
       <div class="eyebrow">令牌 · TOKENS</div>
       <div class="row">
-        <h1>已签发档案</h1>
-        <el-button type="primary" @click="dialogOpen = true">+ 签发新 token</el-button>
+        <h1>API token</h1>
+        <el-button type="primary" @click="dialogOpen = true">+ 新建 token</el-button>
       </div>
-      <div class="sub">签发的 token 仅在首次可见 secret,请交给使用方后自行保管。</div>
+      <div class="sub">secret 只在创建时显示一次,请交给使用方后自行保管。</div>
     </div>
 
     <el-table :data="tokens" v-loading="loading" stripe empty-text="尚无 token">
@@ -98,7 +98,7 @@ onMounted(load)
           <span class="chip" :class="row.role">{{ row.role }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="发出邮票" prop="alias_count" width="120" align="right">
+      <el-table-column label="创建别名数" prop="alias_count" width="120" align="right">
         <template #default="{ row }">
           <span class="count">{{ row.alias_count }}</span>
         </template>
@@ -109,25 +109,27 @@ onMounted(load)
           <span class="dim" v-else>—</span>
         </template>
       </el-table-column>
-      <el-table-column label="签发于" prop="created_at" min-width="180">
+      <el-table-column label="创建于" prop="created_at" min-width="180">
         <template #default="{ row }">
           <span class="mono">{{ new Date(row.created_at).toLocaleDateString() }}</span>
         </template>
       </el-table-column>
       <el-table-column label="操作" width="120" align="right">
         <template #default="{ row }">
-          <el-button
-            v-if="row.role !== 'admin'"
-            link type="danger" size="small"
-            @click="remove(row)"
-          >作废</el-button>
-          <span v-else class="dim">—</span>
+          <div class="acts">
+            <el-button
+              v-if="row.role !== 'admin'"
+              link type="danger" size="small"
+              @click="remove(row)"
+            >删除</el-button>
+            <span v-else class="dim">—</span>
+          </div>
         </template>
       </el-table-column>
     </el-table>
 
-    <!-- 签发对话框 -->
-    <el-dialog v-model="dialogOpen" title="签发新 token" width="440px">
+    <!-- 创建对话框 -->
+    <el-dialog v-model="dialogOpen" title="新建 token" width="440px">
       <el-form label-position="top">
         <el-form-item label="用途名称">
           <el-input v-model="newName" placeholder="例如:某业务方 · GitHub 注册脚本" @keyup.enter="issue" />
@@ -135,7 +137,7 @@ onMounted(load)
       </el-form>
       <template #footer>
         <el-button plain @click="dialogOpen = false">取消</el-button>
-        <el-button type="primary" :loading="issuing" @click="issue">签发</el-button>
+        <el-button type="primary" :loading="issuing" @click="issue">创建</el-button>
       </template>
     </el-dialog>
 
@@ -143,8 +145,8 @@ onMounted(load)
     <el-dialog v-model="revealOpen" width="520px" :show-close="false" :close-on-click-modal="false">
       <template #header>
         <div class="reveal-head">
-          <span class="stamp-mark">ONE-TIME</span>
-          <h2>token 已签发</h2>
+          <span class="once-mark">仅此一次</span>
+          <h2>token 已创建</h2>
         </div>
       </template>
 
@@ -178,17 +180,31 @@ onMounted(load)
 
 .meta { color: var(--dim); font-size: 11px; }
 .dim { color: var(--dim); }
-.count { font-family: var(--f-display); font-weight: 700; font-size: 20px; }
+.count {
+  font-family: var(--f-display); font-weight: 700; font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.acts {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  :deep(.el-button.is-link) {
+    min-height: var(--hit);
+    padding: 0 8px;
+    margin-left: 0;
+  }
+}
 .chip {
   font-family: var(--f-mono); font-size: 10px; letter-spacing: 0.14em;
   padding: 2px 8px; border: 1px solid var(--rule); text-transform: uppercase;
-  &.admin { border-color: var(--stamp); color: var(--stamp); }
+  &.admin { border-color: var(--accent); color: var(--accent); }
   &.user  { border-color: var(--primary); color: var(--primary); }
 }
 
 .reveal-head { display: flex; align-items: baseline; gap: 12px; }
-.stamp-mark {
-  border: 2px solid var(--stamp); color: var(--stamp);
+.once-mark {
+  border: 2px solid var(--accent); color: var(--accent);
   padding: 3px 8px; font-size: 10px; letter-spacing: 0.24em;
 }
 .reveal-head h2 {
@@ -210,5 +226,5 @@ onMounted(load)
   word-break: break-all;
   user-select: all;
 }
-.warn { color: var(--stamp); font-size: 12px; letter-spacing: 0.08em; }
+.warn { color: var(--accent); font-size: 12px; letter-spacing: 0.08em; }
 </style>

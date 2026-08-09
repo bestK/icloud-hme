@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import type { Account, Alias, CreateResult } from '@/types'
-import StampReveal from '@/components/StampReveal.vue'
+import AliasCreated from '@/components/AliasCreated.vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
@@ -19,11 +19,11 @@ const dialogOpen = ref(false)
 const newLabel = ref('')
 const creating = ref(false)
 
-const reveal = ref<CreateResult | null>(null)
-const revealOpen = ref(false)
+const created = ref<CreateResult | null>(null)
+const createdOpen = ref(false)
 
 const emptyHint = computed(() =>
-  accountId.value ? '还没有邮票 — 点右上"贴一枚邮票"开始' : '选择一个 iCloud 账号',
+  accountId.value ? '还没有别名 — 点右上"新建别名"开始' : '选择一个 iCloud 账号',
 )
 
 async function loadAccounts() {
@@ -59,8 +59,8 @@ async function create() {
   if (!accountId.value) return ElMessage.warning('先选账号')
   creating.value = true
   try {
-    reveal.value = await api.createAlias(accountId.value, newLabel.value.trim())
-    revealOpen.value = true
+    created.value = await api.createAlias(accountId.value, newLabel.value.trim())
+    createdOpen.value = true
     dialogOpen.value = false
     newLabel.value = ''
     await loadAliases()
@@ -78,7 +78,7 @@ async function toggle(a: Alias) {
     } else {
       await api.reactivateAlias(a.anonymousId, accountId.value)
     }
-    ElMessage.success(a.active ? '已停用' : '已激活')
+    ElMessage.success(a.active ? '已停用' : '已启用')
     await loadAliases()
   } catch (e: any) {
     ElMessage.error(e?.message || '操作失败')
@@ -87,14 +87,14 @@ async function toggle(a: Alias) {
 
 async function remove(a: Alias) {
   try {
-    await ElMessageBox.confirm(`确定销毁 "${a.email}" ? 不可恢复`, '销毁确认', { type: 'warning' })
+    await ElMessageBox.confirm(`确定删除 "${a.email}" ? 不可恢复`, '删除别名', { type: 'warning' })
   } catch { return }
   try {
     await api.deleteAlias(a.anonymousId, accountId.value)
-    ElMessage.success('已销毁')
+    ElMessage.success('已删除')
     await loadAliases()
   } catch (e: any) {
-    ElMessage.error(e?.message || '销毁失败')
+    ElMessage.error(e?.message || '删除失败')
   }
 }
 
@@ -121,10 +121,10 @@ onMounted(async () => {
     <div class="masthead">
       <div class="row">
         <div>
-          <div class="eyebrow">邮票 · ALIASES</div>
-          <h1>你贴过的邮票</h1>
+          <div class="eyebrow">别名 · ALIASES</div>
+          <h1>别名地址</h1>
         </div>
-        <el-button type="primary" size="large" @click="dialogOpen = true">+ 贴一枚邮票</el-button>
+        <el-button type="primary" size="large" @click="dialogOpen = true">+ 新建别名</el-button>
       </div>
 
       <div class="filter">
@@ -145,7 +145,12 @@ onMounted(async () => {
     <el-table :data="aliases" v-loading="loading" :empty-text="emptyHint" stripe>
       <el-table-column label="地址" prop="email" min-width="240">
         <template #default="{ row }">
-          <span class="email mono" @click="copy(row.email)">{{ row.email }}</span>
+          <button
+            class="email mono copyable"
+            type="button"
+            :title="`复制 ${row.email}`"
+            @click="copy(row.email)"
+          >{{ row.email }}</button>
         </template>
       </el-table-column>
       <el-table-column label="标签" prop="label" min-width="140">
@@ -157,7 +162,7 @@ onMounted(async () => {
       <el-table-column label="状态" prop="active" width="100">
         <template #default="{ row }">
           <span class="chip" :class="row.active ? 'active' : 'inactive'">
-            {{ row.active ? 'active' : 'silent' }}
+            {{ row.active ? 'active' : 'inactive' }}
           </span>
         </template>
       </el-table-column>
@@ -166,33 +171,36 @@ onMounted(async () => {
           <span class="mono meta">{{ row.anonymousId }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="240" align="right">
+      <el-table-column label="操作" width="260" align="right">
         <template #default="{ row }">
-          <el-button link type="primary" size="small" @click="openInbox(row)">收信</el-button>
-          <el-button link size="small" @click="toggle(row)">{{ row.active ? '停用' : '激活' }}</el-button>
-          <el-button link type="danger" size="small" @click="remove(row)">销毁</el-button>
+          <div class="acts">
+            <el-button link type="primary" size="small" @click="openInbox(row)">收件箱</el-button>
+            <el-button link size="small" @click="toggle(row)">{{ row.active ? '停用' : '启用' }}</el-button>
+            <span class="sep" aria-hidden="true" />
+            <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>
 
     <!-- 创建对话框 -->
-    <el-dialog v-model="dialogOpen" title="贴一枚邮票" width="440px">
+    <el-dialog v-model="dialogOpen" title="新建别名" width="440px">
       <el-form label-position="top">
         <el-form-item label="标签(用途备注)">
           <el-input v-model="newLabel" placeholder="例如:GitHub 注册" @keyup.enter="create" />
         </el-form-item>
         <div class="hint">
           <span class="eyebrow">TIP</span>
-          <span>池非空时会秒回一枚现成邮票;池空时会当场向 iCloud 申请。</span>
+          <span>池里有现成地址时立即返回;池空时当场向 iCloud 申请,会慢几秒。</span>
         </div>
       </el-form>
       <template #footer>
         <el-button plain @click="dialogOpen = false">取消</el-button>
-        <el-button type="primary" :loading="creating" @click="create">贴上</el-button>
+        <el-button type="primary" :loading="creating" @click="create">创建</el-button>
       </template>
     </el-dialog>
 
-    <StampReveal :result="reveal" :open="revealOpen" @close="revealOpen = false" />
+    <AliasCreated :result="created" :open="createdOpen" @close="createdOpen = false" />
   </section>
 </template>
 
@@ -211,11 +219,31 @@ onMounted(async () => {
   border-top: 1px dashed var(--rule);
   border-bottom: 1px dashed var(--rule);
 }
-.count-line { color: var(--dim); font-size: 12px; margin-left: auto; }
+.count-line {
+  color: var(--dim); font-size: 12px; margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
 
-.email {
-  cursor: pointer;
-  &:hover { color: var(--primary); }
+.email { word-break: break-all; }
+
+/* 行内操作:给足 40px 点击区,并把"删除"用一条竖线隔开 */
+.acts {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  :deep(.el-button.is-link) {
+    min-height: var(--hit);
+    padding: 0 8px;
+    margin-left: 0;
+  }
+}
+.sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--rule);
+  flex: none;
 }
 .tag {
   font-family: var(--f-mono); font-size: 11px;
