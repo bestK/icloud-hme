@@ -106,6 +106,22 @@ async function submitCookies() {
   }
 }
 
+// 正在重新校验的账号 id,用来只给那一行的按钮转圈
+const revalidatingId = ref('')
+
+async function revalidate(a: Account) {
+  revalidatingId.value = a.id
+  try {
+    const r = await api.revalidateAccount(a.id)
+    ElMessage.success(`已核对:共 ${r.alias_total} 个别名,启用 ${r.alias_active} 个`)
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '校验失败')
+  } finally {
+    revalidatingId.value = ''
+  }
+}
+
 function openLogin(a: Account) {
   loginAcc.value = a
   loginForm.value = { password: '', otp: '' }
@@ -215,8 +231,15 @@ onMounted(load)
       </el-table-column>
       <el-table-column label="别名" width="96" align="right">
         <template #default="{ row }">
-          <span class="num">{{ row.alias_total }}</span>
-          <div class="small dim">启用 {{ row.alias_active }}</div>
+          <!-- 没核对过时 alias_total 的 0 是"不知道",显示 0 会误导 -->
+          <template v-if="row.alias_counted_at">
+            <span class="num">{{ row.alias_total }}</span>
+            <div class="small dim">启用 {{ row.alias_active }}</div>
+          </template>
+          <template v-else>
+            <span class="num dim" title="尚未与 iCloud 核对过">—</span>
+            <div class="small dim">未核对</div>
+          </template>
         </template>
       </el-table-column>
       <el-table-column label="上次校验" min-width="170">
@@ -228,9 +251,15 @@ onMounted(load)
           <div v-if="row.last_error" class="warn small">{{ row.last_error }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="340" align="right">
+      <el-table-column label="操作" width="420" align="right">
         <template #default="{ row }">
           <div class="acts">
+            <el-button
+              link
+              size="small"
+              :loading="revalidatingId === row.id"
+              @click="revalidate(row)"
+            >重新校验</el-button>
             <el-button link type="primary" size="small" @click="openCookies(row)">更新 Cookie</el-button>
             <el-button link size="small" @click="openLogin(row)">密码登录</el-button>
             <el-button link size="small" @click="openApp(row)">App Password</el-button>

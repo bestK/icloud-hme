@@ -84,6 +84,16 @@ export const api = {
       (await http.post(`/accounts/${id}/login`, { password, otp_code: otpCode })).data,
     ),
 
+  revalidateAccount: async (id: string) =>
+    unwrap<{
+      id: string
+      status: string
+      alias_total: number
+      alias_active: number
+      alias_counted_at: string
+      last_validated: string
+    }>((await http.post(`/accounts/${id}/revalidate`)).data),
+
   setAppPassword: async (id: string, icloud_email: string, app_password: string) =>
     unwrap<{ id: string; icloud_email: string }>(
       (await http.post(`/accounts/${id}/password`, { icloud_email, app_password })).data,

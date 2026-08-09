@@ -9,6 +9,8 @@ export interface Account {
   status: string
   alias_total: number
   alias_active: number
+  /** 上次向上游核对计数的时间。为空表示从未核对过,此时上面两个 0 是"未知"而不是"没有" */
+  alias_counted_at?: string
   last_validated: string
   created_at: string
 }

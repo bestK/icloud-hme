@@ -31,6 +31,10 @@ type Account struct {
 	Status       string            `json:"status"` // active / error
 	AliasTotal   int               `json:"alias_total"`
 	AliasActive  int               `json:"alias_active"`
+	// AliasCountedAt 是上一次向上游拉完整列表核对计数的时间。
+	// 为空表示从未核对过 —— 此时 AliasTotal/AliasActive 的 0 是"不知道",
+	// 不是"真的没有"。前端要据此区分显示,不能直接显示 0。
+	AliasCountedAt string          `json:"alias_counted_at,omitempty"`
 	LastValidated string           `json:"last_validated"`
 	LastError    string            `json:"last_error,omitempty"`
 	CreatedAt    string            `json:"created_at"`
@@ -195,12 +199,10 @@ func (m *Manager) AddAccount(name, cookieInput, host, proxy string) (*Account, e
 				acc.ICloudEmail = deriveICloudEmail(info)
 			}
 			if aliases, err := client.ListAliases(); err == nil {
-				acc.AliasTotal = len(aliases)
-				for _, a := range aliases {
-					if a.Active {
-						acc.AliasActive++
-					}
-				}
+				total, active := countAliases(aliases)
+				acc.AliasTotal = total
+				acc.AliasActive = active
+				acc.AliasCountedAt = time.Now().Format(time.RFC3339)
 			}
 			acc.LastValidated = time.Now().Format(time.RFC3339)
 		}
@@ -251,6 +253,176 @@ func (m *Manager) ListAccounts() []*Account {
 		out = append(out, &cp)
 	}
 	return out
+}
+
+// countAliases 统计别名总数与其中激活的数量。
+func countAliases(aliases []hme.Alias) (total, active int) {
+	total = len(aliases)
+	for _, a := range aliases {
+		if a.Active {
+			active++
+		}
+	}
+	return total, active
+}
+
+// AliasDelta 描述一次别名变更对计数的影响。
+// 用于那些语义明确、不值得为了核对再往上游打一次请求的路径。
+type AliasDelta struct {
+	Total  int // 别名总数变化
+	Active int // 其中激活数量的变化
+}
+
+var (
+	// AliasCreated 新建了一个别名(新建的别名默认是激活的)。
+	AliasCreated = AliasDelta{Total: 1, Active: 1}
+	// AliasDeactivated 停用了一个已有别名,总数不变。
+	AliasDeactivated = AliasDelta{Total: 0, Active: -1}
+	// AliasReactivated 重新启用了一个已有别名,总数不变。
+	AliasReactivated = AliasDelta{Total: 0, Active: 1}
+)
+
+// ApplyAliasDelta 增量调整账号的别名计数。
+//
+// 只在计数已经核对过(AliasCountedAt 非空)时生效 —— 否则基数本身是"不知道",
+// 在未知值上做加减只会得到一个看着像真的假数字。未核对时直接跳过,
+// 等某次 RefreshAliasCounts 把基数建立起来。
+//
+// 计数只是展示用的统计,调整失败不影响主流程,因此不返回错误。
+func (m *Manager) ApplyAliasDelta(id string, d AliasDelta) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	acc, ok := m.accounts[id]
+	if !ok || acc.AliasCountedAt == "" {
+		return
+	}
+	acc.AliasTotal = clampNonNegative(acc.AliasTotal + d.Total)
+	acc.AliasActive = clampNonNegative(acc.AliasActive + d.Active)
+	// 激活数不可能超过总数
+	if acc.AliasActive > acc.AliasTotal {
+		acc.AliasActive = acc.AliasTotal
+	}
+	_ = m.save()
+}
+
+// SetAliasCountsFrom 用一份已经拉到手的完整别名列表校准计数,不再打网络请求。
+// 调用方必须保证 aliases 是该账号的**全量**列表(没有按 token 过滤过),
+// 否则会把计数写成某个子集的大小。
+func (m *Manager) SetAliasCountsFrom(id string, aliases []hme.Alias) {
+	total, active := countAliases(aliases)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	acc, ok := m.accounts[id]
+	if !ok {
+		return
+	}
+	acc.AliasTotal = total
+	acc.AliasActive = active
+	acc.AliasCountedAt = time.Now().Format(time.RFC3339)
+	_ = m.save()
+}
+
+// RefreshAliasCounts 用已有客户端向上游拉完整别名列表,把计数校准成精确值。
+//
+// 传入 client 是为了复用调用方已经建好的连接;传 nil 则内部自建。
+// 返回校准后的 (total, active)。
+func (m *Manager) RefreshAliasCounts(id string, client *hme.Client) (int, int, error) {
+	if client == nil {
+		var err error
+		client, err = m.HMEClient(id, false)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	aliases, err := client.ListAliases()
+	// 上游会轮换 token,顺手持久化
+	_ = m.SaveCookies(id, client.Cookies)
+	if err != nil {
+		return 0, 0, err
+	}
+	total, active := countAliases(aliases)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	acc, ok := m.accounts[id]
+	if !ok {
+		return 0, 0, fmt.Errorf("账号不存在: %s", id)
+	}
+	acc.AliasTotal = total
+	acc.AliasActive = active
+	acc.AliasCountedAt = time.Now().Format(time.RFC3339)
+	if err := m.save(); err != nil {
+		return total, active, err
+	}
+	return total, active, nil
+}
+
+// Revalidate 重新校验账号会话并校准别名计数。
+// 用于手动把漂移了的数字拉平(比如在 iCloud 官网上直接改过别名之后)。
+func (m *Manager) Revalidate(id string) (*Account, error) {
+	m.mu.Lock()
+	acc, ok := m.accounts[id]
+	m.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("账号不存在: %s", id)
+	}
+	if len(acc.Cookies) == 0 {
+		return nil, fmt.Errorf("账号未配置 Cookie，无法校验")
+	}
+
+	client, err := hme.NewClient(acc.Cookies, acc.Host, acc.Proxy, false)
+	if err != nil {
+		m.markError(id, "创建客户端失败: "+err.Error())
+		return nil, err
+	}
+	if err := client.ValidateSession(); err != nil {
+		m.markError(id, "Cookie 校验失败: "+err.Error())
+		return nil, err
+	}
+
+	m.mu.Lock()
+	if cur, ok := m.accounts[id]; ok {
+		cur.Status = "active"
+		cur.LastError = ""
+		cur.LastValidated = time.Now().Format(time.RFC3339)
+		cur.Cookies = client.Cookies
+		if info := client.AccountInfo(); info != nil {
+			cur.RealEmail = firstNonEmpty(info.AppleID, info.PrimaryEmail)
+			if cur.ICloudEmail == "" {
+				cur.ICloudEmail = deriveICloudEmail(info)
+			}
+		}
+		_ = m.save()
+	}
+	m.mu.Unlock()
+
+	// 会话有效,校准计数
+	if _, _, err := m.RefreshAliasCounts(id, client); err != nil {
+		return nil, err
+	}
+
+	cp, _ := m.GetAccount(id)
+	return cp, nil
+}
+
+// markError 把账号标记为错误状态并落盘。
+func (m *Manager) markError(id, msg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	acc, ok := m.accounts[id]
+	if !ok {
+		return
+	}
+	acc.Status = "error"
+	acc.LastError = truncate(msg, 300)
+	_ = m.save()
+}
+
+func clampNonNegative(v int) int {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // HMEClient 为指定账号创建一个新的 HME 客户端。
@@ -413,24 +585,32 @@ func (m *Manager) UpdateCookies(id string, cookies map[string]string) error {
 		return fmt.Errorf("账号不存在: %s", id)
 	}
 
-	// 自动校验 Cookie 是否有效
-	acc.Cookies = cookies
+	// 读一份建客户端需要的字段,不在锁外改共享结构体
+	m.mu.Lock()
 	if acc.Host == "" {
 		acc.Host = "icloud.com"
 	}
-	client, err := hme.NewClient(cookies, acc.Host, acc.Proxy, false)
+	host, proxy := acc.Host, acc.Proxy
+	m.mu.Unlock()
+
+	client, err := hme.NewClient(cookies, host, proxy, false)
 	if err != nil {
 		m.mu.Lock()
+		acc.Cookies = cookies
 		acc.Status = "error"
 		acc.LastError = "创建客户端失败: " + err.Error()
-		m.accounts[id] = acc
 		_ = m.save()
 		m.mu.Unlock()
 		return err
 	}
-	if err := client.ValidateSession(); err != nil {
+
+	validateErr := client.ValidateSession()
+
+	m.mu.Lock()
+	acc.Cookies = cookies
+	if validateErr != nil {
 		acc.Status = "error"
-		acc.LastError = "Cookie 校验失败: " + err.Error()
+		acc.LastError = "Cookie 校验失败: " + validateErr.Error()
 	} else {
 		acc.Status = "active"
 		acc.LastValidated = time.Now().Format(time.RFC3339)
@@ -442,12 +622,19 @@ func (m *Manager) UpdateCookies(id string, cookies map[string]string) error {
 			}
 		}
 	}
-
-	m.mu.Lock()
-	m.accounts[id] = acc
 	saveErr := m.save()
 	m.mu.Unlock()
-	return saveErr
+	if saveErr != nil {
+		return saveErr
+	}
+
+	// 会话有效时顺手校准别名计数 —— 这里是"先建账号、后补 Cookie"的主路径,
+	// 漏掉它就会让计数永远停在 0(AddAccount 里那段只在建号即带 Cookie 时才跑)。
+	// 计数是展示用的,校准失败不影响 Cookie 已更新成功这件事。
+	if validateErr == nil {
+		_, _, _ = m.RefreshAliasCounts(id, client)
+	}
+	return nil
 }
 
 // ---- 辅助函数 ----

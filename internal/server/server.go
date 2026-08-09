@@ -62,6 +62,7 @@ func (s *Server) register() {
 	adm.POST("/accounts/:id/password", s.setAppPassword)
 	adm.PUT("/accounts/:id/cookies", s.updateCookies)
 	adm.POST("/accounts/:id/login", s.loginAccount)
+	adm.POST("/accounts/:id/revalidate", s.revalidateAccount)
 	adm.POST("/reload", s.reloadConfig)
 	adm.GET("/tokens", s.listTokens)
 	adm.POST("/tokens", s.createToken)
@@ -91,6 +92,24 @@ func ok(c *gin.Context, data interface{}) {
 
 func fail(c *gin.Context, code int, msg string) {
 	c.JSON(code, apiResp{Success: false, Message: msg})
+}
+
+// failUpstream 把 iCloud 上游返回的错误统一映射为 HTTP 状态码:
+//   - 会话失效(401/403/session/cookie/认证等关键字) → 401
+//   - 限流(hme.IsRateLimit) → 429
+//   - 其他上游错误 → 502
+//
+// prefix 用于给用户提供操作上下文,比如"创建邮箱失败"。
+func failUpstream(c *gin.Context, prefix string, err error) {
+	msg := err.Error()
+	switch {
+	case isSessionError(msg):
+		fail(c, http.StatusUnauthorized, prefix+": iCloud 会话失效,请更新 Cookie — "+msg)
+	case hme.IsRateLimit(msg):
+		fail(c, http.StatusTooManyRequests, prefix+": iCloud 限流,请稍后重试 — "+msg)
+	default:
+		fail(c, http.StatusBadGateway, prefix+": "+msg)
+	}
 }
 
 // ====================================================================
@@ -129,6 +148,8 @@ func (s *Server) createAlias(c *gin.Context) {
 			if tok := currentToken(c); tok != nil {
 				_ = s.tokens.BindAlias(tok.ID, ref)
 			}
+			// 这里不动账号别名计数:池里的条目在 filler 预建时就已经
+			// 在 iCloud 侧创建并计过数了,Pop 只是把它交出去。
 			ok(c, gin.H{
 				"email":        entry.Email,
 				"anonymous_id": entry.AnonymousID,
@@ -153,16 +174,7 @@ func (s *Server) createAlias(c *gin.Context) {
 	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
 
 	if err != nil {
-		// 区分会话失效 / 限流 / 其他错误
-		msg := err.Error()
-		switch {
-		case isSessionError(msg):
-			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
-		case hme.IsRateLimit(msg):
-			fail(c, http.StatusTooManyRequests, "iCloud 创建速率超限,请稍后重试: "+msg)
-		default:
-			fail(c, http.StatusBadGateway, "创建邮箱失败: "+msg)
-		}
+		failUpstream(c, "创建邮箱失败", err)
 		return
 	}
 
@@ -177,6 +189,9 @@ func (s *Server) createAlias(c *gin.Context) {
 		}
 		_ = s.tokens.BindAlias(tok.ID, ref)
 	}
+
+	// 实时申请这条路径确实新增了一个上游别名,计入账号统计
+	s.mgr.ApplyAliasDelta(req.AccountID, account.AliasCreated)
 
 	ok(c, gin.H{
 		"email":        result.Email,
@@ -256,7 +271,7 @@ func (s *Server) listInbox(c *gin.Context) {
 	if alias != "" {
 		messages, err := wmc.FindByAlias(alias, limit)
 		if err != nil {
-			fail(c, http.StatusBadGateway, "读取邮件失败: "+err.Error())
+			failUpstream(c, "读取邮件失败", err)
 			return
 		}
 		ok(c, gin.H{
@@ -269,7 +284,7 @@ func (s *Server) listInbox(c *gin.Context) {
 	} else {
 		messages, err := wmc.ListInbox(limit)
 		if err != nil {
-			fail(c, http.StatusBadGateway, "读取邮件失败: "+err.Error())
+			failUpstream(c, "读取邮件失败", err)
 			return
 		}
 		ok(c, gin.H{
@@ -381,17 +396,31 @@ func (s *Server) loginAccount(c *gin.Context) {
 
 	client, err := s.mgr.HMEClientWithPassword(id, req.Password, otpProvider)
 	if err != nil {
-		if isSessionError(err.Error()) {
-			fail(c, http.StatusUnauthorized, err.Error())
-		} else {
-			fail(c, http.StatusBadGateway, "登录失败: "+err.Error())
-		}
+		failUpstream(c, "登录失败", err)
 		return
 	}
 
 	ok(c, gin.H{
 		"id":      id,
 		"cookies": client.Cookies,
+	})
+}
+
+// revalidateAccount 重新校验会话并把别名计数拉平到上游真实值。
+func (s *Server) revalidateAccount(c *gin.Context) {
+	id := c.Param("id")
+	acc, err := s.mgr.Revalidate(id)
+	if err != nil {
+		failUpstream(c, "重新校验失败", err)
+		return
+	}
+	ok(c, gin.H{
+		"id":               acc.ID,
+		"status":           acc.Status,
+		"alias_total":      acc.AliasTotal,
+		"alias_active":     acc.AliasActive,
+		"alias_counted_at": acc.AliasCountedAt,
+		"last_validated":   acc.LastValidated,
 	})
 }
 
@@ -409,13 +438,13 @@ func (s *Server) listAliases(c *gin.Context) {
 	aliases, err := client.ListAliases()
 	_ = s.mgr.SaveCookies(accountID, client.Cookies)
 	if err != nil {
-		if isSessionError(err.Error()) {
-			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
-		} else {
-			fail(c, http.StatusBadGateway, err.Error())
-		}
+		failUpstream(c, "拉取别名列表失败", err)
 		return
 	}
+	// 这里拿到的是全量列表,先校准计数再按 token 过滤 —— 顺序反了就会把
+	// 某个 token 名下的子集大小写成账号总数。
+	s.mgr.SetAliasCountsFrom(accountID, aliases)
+
 	if !isAdmin(c) {
 		aliases = filterAliasesByToken(aliases, s.tokens, currentToken(c).ID)
 	}
@@ -472,9 +501,11 @@ func (s *Server) deactivateAlias(c *gin.Context) {
 	success, err := client.DeactivateHME(anonymousID)
 	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
 	if err != nil {
-		fail(c, http.StatusBadGateway, "停用失败: "+err.Error())
+		failUpstream(c, "停用失败", err)
 		return
 	}
+	// 总数不变,激活数 -1
+	s.mgr.ApplyAliasDelta(req.AccountID, account.AliasDeactivated)
 	ok(c, gin.H{"anonymous_id": anonymousID, "success": success})
 }
 
@@ -499,9 +530,11 @@ func (s *Server) reactivateAlias(c *gin.Context) {
 	success, err := client.ReactivateHME(anonymousID)
 	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
 	if err != nil {
-		fail(c, http.StatusBadGateway, "激活失败: "+err.Error())
+		failUpstream(c, "激活失败", err)
 		return
 	}
+	// 总数不变,激活数 +1
+	s.mgr.ApplyAliasDelta(req.AccountID, account.AliasReactivated)
 	ok(c, gin.H{"anonymous_id": anonymousID, "success": success})
 }
 
@@ -526,7 +559,7 @@ func (s *Server) deleteAlias(c *gin.Context) {
 
 	if err := client.Delete(anonymousID); err != nil {
 		_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
-		fail(c, http.StatusBadGateway, "删除失败: "+err.Error())
+		failUpstream(c, "删除失败", err)
 		return
 	}
 	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
@@ -534,6 +567,9 @@ func (s *Server) deleteAlias(c *gin.Context) {
 	for _, t := range s.tokens.List() {
 		_ = s.tokens.UnbindAlias(t.ID, anonymousID)
 	}
+	// 删除走精确刷新而不是 -1:这里不知道被删的那条原本是否激活,
+	// 猜错就会让 AliasActive 长期偏移。删除本来就慢且少,多一次列表请求可以接受。
+	_, _, _ = s.mgr.RefreshAliasCounts(req.AccountID, client)
 	ok(c, gin.H{"anonymous_id": anonymousID})
 }
 

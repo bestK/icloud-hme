@@ -114,6 +114,9 @@ func (f *Filler) refillOne(accountID string) bool {
 		log.Printf("pool filler %s push 失败: %v", accountID, err)
 		return false
 	}
+	// 别名此刻已在 iCloud 侧真实存在,计入账号统计。
+	// 后续用户 Pop 这条时不再计数,否则会重复。
+	f.mgr.ApplyAliasDelta(accountID, account.AliasCreated)
 	log.Printf("pool filler %s +1 → depth=%d", accountID, f.store.Depth(accountID))
 	return true
 }
