@@ -27,6 +27,9 @@ import (
 const (
 	OAuthClientID = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
 
+	authOrigin    = "https://idmsa.apple.com"
+	authUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 	authStartFmt    = "https://idmsa.apple.com/appleauth/auth/authorize/signin?frame_id=auth-%s&language=en_US&skVersion=7&iframeId=auth-%s&client_id=%s&redirect_uri=https://www.icloud.com&response_type=code&response_mode=web_message&state=auth-%s&authVersion=latest"
 	authFederate    = "https://idmsa.apple.com/appleauth/auth/federate?isRememberMeEnabled=true"
 	authInit        = "https://idmsa.apple.com/appleauth/auth/signin/init"
@@ -43,6 +46,11 @@ type authState struct {
 	username string
 	frameId  string
 	clientId string
+	// countryCode 来自响应头 X-Apple-ID-Account-Country,accountLogin 要用。
+	// 写死 USA 对非美区账号是错的。
+	countryCode string
+	// webCookies 是 accountLogin 响应里的 Set-Cookie,也就是 iCloud Web 会话本体
+	webCookies map[string]string
 	// srpC 是 signin/init 返回的 SRP 挑战令牌(形如 "i-569-...")。
 	// signin/complete 必须原样带回,Apple 靠它找回那次 SRP 会话。
 	// 别和 clientId(OAuth 客户端 ID)搞混 —— 传错了 M1 就无法校验,
@@ -68,14 +76,51 @@ type AuthError struct {
 }
 
 func (e *AuthError) Error() string {
-	if e.Body == "" {
+	// Status 为 0 表示不是某个响应报的错,而是我们自己在流程里发现状态不对
+	switch {
+	case e.Status == 0 && e.Body == "":
+		return e.Reason
+	case e.Status == 0:
+		return e.Reason + " — " + e.Body
+	case e.Body == "":
 		return fmt.Sprintf("%s (HTTP %d)", e.Reason, e.Status)
+	default:
+		return fmt.Sprintf("%s (HTTP %d) — %s", e.Reason, e.Status, e.Body)
 	}
-	return fmt.Sprintf("%s (HTTP %d) — %s", e.Reason, e.Status, e.Body)
 }
 
 // UpstreamStatus 让调用方不必区分错误类型就能取到上游状态码。
 func (e *AuthError) UpstreamStatus() int { return e.Status }
+
+// capture 从 idmsa 的响应头里收集认证状态。
+//
+// 每一步都要收,而且只在有值时覆盖。Apple 在哪一步下发 X-Apple-Session-Token
+// 并不固定:没开 2FA 时在 signin/complete,开了 2FA 后可能在 securitycode,
+// 也可能在 2sv/trust。只认某一步、或者拿空值覆盖掉已有的,accountLogin 就会
+// 带着空 token 去换会话,Apple 回一句 400 Invalid Session Token —— 那句话
+// 看起来像"会话过期",其实是"你什么都没给我"。
+func (s *authState) capture(resp *http.Response) {
+	setIfPresent(&s.sessionID, resp, "X-Apple-ID-Session-Id")
+	setIfPresent(&s.scnt, resp, "scnt")
+	setIfPresent(&s.authAttr, resp, "X-Apple-Auth-Attributes")
+	setIfPresent(&s.authToken, resp, "X-Apple-Session-Token")
+	setIfPresent(&s.trustToken, resp, "X-Apple-TwoSV-Trust-Token")
+	setIfPresent(&s.countryCode, resp, "X-Apple-ID-Account-Country")
+}
+
+func setIfPresent(dst *string, resp *http.Response, header string) {
+	if v := resp.Header.Get(header); v != "" {
+		*dst = v
+	}
+}
+
+// tokenState 用于日志:令牌本身是凭据,只报告有没有和多长。
+func tokenState(v string) string {
+	if v == "" {
+		return "缺失"
+	}
+	return fmt.Sprintf("%d 字节", len(v))
+}
 
 // authFail 把 idmsa 的非预期响应包成 AuthError。调用方负责给出 reason。
 func authFail(resp *http.Response, reason string) *AuthError {
@@ -183,7 +228,14 @@ func (c *Client) finishLogin(state *authState) error {
 	if err := c.authenticateWeb(state); err != nil {
 		return fmt.Errorf("authenticate web: %w", err)
 	}
-	c.Cookies = c.extractSessionCookies()
+	cookies := c.extractSessionCookies()
+	for name, value := range state.webCookies {
+		cookies[name] = value
+	}
+	if len(cookies) == 0 {
+		return fmt.Errorf("认证流程走完了但没拿到任何 Cookie")
+	}
+	c.Cookies = cookies
 	c.log("登录成功,获取到 %d 个 Cookie", len(c.Cookies))
 	return nil
 }
@@ -227,7 +279,7 @@ func (c *Client) authStart(state *authState) error {
 		return authFail(resp, "认证会话初始化失败")
 	}
 
-	state.authAttr = resp.Header.Get("X-Apple-Auth-Attributes")
+	state.capture(resp)
 	return nil
 }
 
@@ -248,6 +300,7 @@ func (c *Client) authFederate(state *authState) error {
 	}
 	defer resp.Body.Close()
 
+	state.capture(resp)
 	if resp.StatusCode != 200 {
 		return authFail(resp, "提交账号名被拒绝")
 	}
@@ -289,6 +342,8 @@ func (c *Client) authInit(state *authState, a string) (*authInitResp, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	state.capture(resp)
 
 	// 不检查状态码就 decode,拿到的是一个字段全空的结构体,错误会推迟到
 	// signin/complete 上变成一个看不懂的 401
@@ -338,13 +393,13 @@ func (c *Client) authComplete(state *authState, m1, m2 string) (needs2FA bool, e
 	}
 	defer resp.Body.Close()
 
+	state.capture(resp)
+
 	switch resp.StatusCode {
 	case 200:
 		return false, nil
 	case 409:
-		// 需要 2FA:留下 sessionID / scnt,后续提交验证码要带
-		state.sessionID = resp.Header.Get("X-Apple-ID-Session-Id")
-		state.scnt = resp.Header.Get("scnt")
+		// 需要 2FA。sessionID / scnt 已经由 capture 收下,后续提交验证码要带
 		if state.sessionID == "" {
 			return false, fmt.Errorf("需要双重认证,但响应里没有 X-Apple-ID-Session-Id")
 		}
@@ -379,19 +434,24 @@ func (c *Client) submitSecurityCode(state *authState, code string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 204 {
-		// Apple 对错码返 400。这一步失败后 sessionID 就废了,只能重新发起
-		// 登录让它重发一个码。
-		if resp.StatusCode == 400 {
-			return authFail(resp, "验证码错误或已过期,请重新输密码发起登录")
-		}
+	hasToken := resp.Header.Get("X-Apple-Session-Token") != ""
+	state.capture(resp)
+
+	switch {
+	case resp.StatusCode == 204:
+		return nil
+	case resp.StatusCode == 409 && hasToken:
+		// 2026 年中之后 Apple 在验证码正确时也会返 409(body 里
+		// securityCode.valid=true),但照样下发会话令牌。以有没有发令牌为准,
+		// 只看状态码会把成功当成失败。
+		c.log("验证码已接受(Apple 返 409 但下发了会话令牌)")
+		return nil
+	case resp.StatusCode == 400:
+		// 这一步失败后 sessionID 就废了,只能重新发起登录让它重发一个码
+		return authFail(resp, "验证码错误或已过期,请重新输密码发起登录")
+	default:
 		return authFail(resp, "验证码校验失败")
 	}
-
-	if newScnt := resp.Header.Get("scnt"); newScnt != "" {
-		state.scnt = newScnt
-	}
-	return nil
 }
 
 // getTrust 获取 trust token
@@ -409,21 +469,41 @@ func (c *Client) getTrust(state *authState) error {
 	}
 	defer resp.Body.Close()
 
+	state.capture(resp)
 	if resp.StatusCode != 204 {
 		return authFail(resp, "信任设备失败")
 	}
-
-	state.authToken = resp.Header.Get("X-Apple-Session-Token")
-	state.trustToken = resp.Header.Get("X-Apple-TwoSV-Trust-Token")
 	return nil
 }
 
-// authenticateWeb 认证 iCloud Web 服务
+// authenticateWeb 用会话令牌换 iCloud Web 服务的 Cookie
 func (c *Client) authenticateWeb(state *authState) error {
-	body := fmt.Sprintf(`{"dsWebAuthToken":"%s","accountCountryCode":"USA","extended_login":true,"trustToken":"%s"}`,
-		state.authToken, state.trustToken)
+	c.log("换取 iCloud Web 会话: session=%s trust=%s country=%s",
+		tokenState(state.authToken), tokenState(state.trustToken), nonEmpty(state.countryCode, "未知"))
 
-	req, err := http.NewRequest("POST", authWebFmt, bytes.NewReader([]byte(body)))
+	if state.authToken == "" {
+		// 空 token 递上去,Apple 只会回一句 Invalid Session Token,
+		// 把"前面某步没下发令牌"这个真实原因盖掉
+		return &AuthError{Reason: "前面的认证步骤没有下发会话令牌(X-Apple-Session-Token),无法换取 iCloud 会话"}
+	}
+
+	country := nonEmpty(state.countryCode, "USA")
+	payload := map[string]any{
+		"dsWebAuthToken":     state.authToken,
+		"accountCountryCode": country,
+		"extended_login":     true,
+	}
+	if state.trustToken != "" {
+		payload["trustToken"] = state.trustToken
+	}
+	// 手拼 JSON 字符串,令牌里出现一个需要转义的字符就会拼出坏 JSON,
+	// 报出来还是那句 Invalid Session Token
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", authWebFmt, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -450,6 +530,17 @@ func (c *Client) authenticateWeb(state *authState) error {
 	json.NewDecoder(resp.Body).Decode(&result)
 	state.dsid = result.DsInfo.Dsid
 
+	// 这个响应的 Set-Cookie 就是 Web 会话本体。直接收下,不靠 cookie jar 的
+	// 域名匹配 —— setup.icloud.com 下发的 host-only Cookie 在
+	// www.icloud.com 上取不到。
+	state.webCookies = make(map[string]string)
+	for _, ck := range resp.Cookies() {
+		if ck.Name != "" && ck.Value != "" {
+			state.webCookies[ck.Name] = ck.Value
+		}
+	}
+	c.log("accountLogin 成功: dsid=%s cookies=%d", nonEmpty(state.dsid, "未知"), len(state.webCookies))
+
 	// 复制 idmsa.apple.com 的 Cookie 到 icloud.com
 	u1, _ := url.Parse("https://idmsa.apple.com")
 	u2, _ := url.Parse("https://icloud.com")
@@ -469,22 +560,45 @@ func (c *Client) extractSessionCookies() map[string]string {
 	return cookies
 }
 
-// updateAuthHeaders 更新认证请求所需的头部
+// updateAuthHeaders 更新认证请求所需的头部。
+//
+// 那组 X-Apple-OAuth-* / Widget-Key / Frame-Id 是 Apple 用来判断「这是
+// icloud.com 的网页登录」的依据,不是可选装饰:缺了它们,2sv/trust 照样返 204,
+// 但不会下发 X-Apple-Session-Token,于是 accountLogin 只能拿空 token 去换,
+// 回一句 400 Invalid Session Token。
 func (c *Client) updateAuthHeaders(header http.Header, state *authState) http.Header {
+	frameTag := "auth-" + state.frameId
+
+	header.Set("Accept", "application/json")
+	header.Set("Content-Type", "application/json")
+	header.Set("User-Agent", authUserAgent)
+	header.Set("Origin", authOrigin)
+	header.Set("Referer", authOrigin+"/")
+	header.Set("X-Requested-With", "XMLHttpRequest")
+
+	header.Set("X-Apple-Widget-Key", state.clientId)
+	header.Set("X-Apple-OAuth-Client-Id", state.clientId)
+	header.Set("X-Apple-OAuth-Client-Type", "firstPartyAuth")
+	header.Set("X-Apple-OAuth-Redirect-URI", "https://www.icloud.com")
+	header.Set("X-Apple-OAuth-Require-Grant-Code", "true")
+	header.Set("X-Apple-OAuth-Response-Mode", "web_message")
+	header.Set("X-Apple-OAuth-Response-Type", "code")
+	header.Set("X-Apple-OAuth-State", frameTag)
+	header.Set("X-Apple-Frame-Id", frameTag)
+	header.Set("X-Apple-Mandate-Security-Upgrade", "0")
+	header.Set("X-Apple-I-Require-UE", "true")
+	header.Set("X-Apple-I-FD-Client-Info", `{"U":"`+authUserAgent+`","L":"en-US","Z":"GMT+08:00","V":"1.1","F":""}`)
+
+	// authStart 拿到的这个值要在后续每一步回带
+	if state.authAttr != "" {
+		header.Set("X-Apple-Auth-Attributes", state.authAttr)
+	}
 	if state.scnt != "" {
 		header.Set("scnt", state.scnt)
 	}
 	if state.sessionID != "" {
 		header.Set("X-Apple-ID-Session-Id", state.sessionID)
 	}
-
-	header.Set("X-Requested-With", "XMLHttpRequest")
-	header.Set("Content-Type", "application/json")
-	header.Set("Accept", "application/json")
-	header.Set("Referer", "https://idmsa.apple.com/")
-	header.Set("Origin", "https://idmsa.apple.com")
-	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-
 	return header
 }
 
