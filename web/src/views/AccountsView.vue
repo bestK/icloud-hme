@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
-import type { Account } from '@/types'
+import type { Account, LoginDone } from '@/types'
 
 const accounts = ref<Account[]>([])
 const loading = ref(false)
@@ -18,11 +18,17 @@ const ckAcc = ref<Account | null>(null)
 const ckRaw = ref('')
 const ckLoading = ref(false)
 
-// 密码登录
+// 密码登录:分两步。验证码是 Apple 在密码通过之后才发的,不可能跟密码同时填。
 const loginOpen = ref(false)
 const loginAcc = ref<Account | null>(null)
-const loginForm = ref({ password: '', otp: '' })
+const loginStep = ref<'password' | 'code'>('password')
+const loginForm = ref({ password: '', code: '' })
+const loginId = ref('')
+const loginAppleId = ref('')
 const loginLoading = ref(false)
+// 待验证会话在服务端有 TTL,过期得从密码重来,所以把剩余时间摆出来
+const loginLeft = ref(0)
+let loginTimer: ReturnType<typeof setInterval> | undefined
 
 // App Password
 const appOpen = ref(false)
@@ -124,29 +130,98 @@ async function revalidate(a: Account) {
 
 function openLogin(a: Account) {
   loginAcc.value = a
-  loginForm.value = { password: '', otp: '' }
+  loginStep.value = 'password'
+  loginForm.value = { password: '', code: '' }
+  loginId.value = ''
+  loginAppleId.value = ''
+  stopCountdown()
   loginOpen.value = true
 }
 
-async function submitLogin() {
+function closeLogin() {
+  loginOpen.value = false
+  loginForm.value = { password: '', code: '' }
+  loginId.value = ''
+  stopCountdown()
+}
+
+function startCountdown(seconds: number) {
+  stopCountdown()
+  loginLeft.value = seconds
+  loginTimer = setInterval(() => {
+    loginLeft.value -= 1
+    if (loginLeft.value <= 0) stopCountdown()
+  }, 1000)
+}
+
+function stopCountdown() {
+  if (loginTimer) {
+    clearInterval(loginTimer)
+    loginTimer = undefined
+  }
+  loginLeft.value = 0
+}
+
+const loginLeftText = computed(() => {
+  const s = Math.max(0, loginLeft.value)
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+})
+
+// 第一步:提交密码。开了 2FA 的账号到这里 Apple 才会把验证码发出去。
+async function submitPassword() {
   if (!loginAcc.value) return
   if (!loginForm.value.password) return ElMessage.warning('填 Apple ID 密码')
   loginLoading.value = true
   try {
-    await api.loginAccount(loginAcc.value.id, loginForm.value.password, loginForm.value.otp || undefined)
-    ElMessage.success('已获取 Cookie 并保存')
-    loginOpen.value = false
-    await load()
+    const r = await api.loginAccount(loginAcc.value.id, loginForm.value.password)
+    if (r.status === 'needs_2fa') {
+      loginId.value = r.login_id
+      loginAppleId.value = r.apple_id
+      loginStep.value = 'code'
+      loginForm.value.password = '' // 后面这步不再需要密码,不留在内存里
+      startCountdown(r.expires_in)
+      ElMessage.info('验证码已发到受信任设备')
+      return
+    }
+    await settleLogin(r)
   } catch (e: any) {
-    const msg = e?.message || '登录失败'
-    if (msg.includes('otp') || msg.includes('2FA') || msg.includes('验证码')) {
-      ElMessage.info('需要 2FA 验证码,填入后再次点登录')
-    } else {
-      ElMessage.error(msg)
+    ElMessage.error(e?.message || '登录失败')
+  } finally {
+    loginLoading.value = false
+  }
+}
+
+// 第二步:提交验证码,复用第一步那个 Apple 会话
+async function submitCode() {
+  if (!loginAcc.value) return
+  const code = loginForm.value.code.trim()
+  if (!/^\d{6}$/.test(code)) return ElMessage.warning('验证码是 6 位数字')
+  loginLoading.value = true
+  try {
+    await settleLogin(await api.verifyLogin(loginAcc.value.id, loginId.value, code))
+  } catch (e: any) {
+    ElMessage.error(e?.message || '验证失败')
+    loginForm.value.code = ''
+    // 410 = 服务端那份待验证会话没了,只能从密码重来
+    if (e?.status === 410) {
+      loginStep.value = 'password'
+      loginId.value = ''
+      stopCountdown()
     }
   } finally {
     loginLoading.value = false
   }
+}
+
+async function settleLogin(r: LoginDone) {
+  if (r.validated) {
+    ElMessage.success(`登录成功,已保存 ${r.cookies_count} 条 Cookie`)
+  } else {
+    // Cookie 拿到了但用不了,别报成功
+    ElMessage.warning(r.warning || 'Cookie 已保存,但会话校验没通过')
+  }
+  closeLogin()
+  await load()
 }
 
 function openApp(a: Account) {
@@ -191,6 +266,7 @@ async function copyId(id: string) {
 }
 
 onMounted(load)
+onUnmounted(stopCountdown)
 </script>
 
 <template>
@@ -321,31 +397,68 @@ onMounted(load)
       </template>
     </el-dialog>
 
-    <!-- 密码登录 -->
-    <el-dialog v-model="loginOpen" width="480px">
+    <!-- 密码登录:第 1 步密码,第 2 步验证码 -->
+    <el-dialog v-model="loginOpen" width="480px" @closed="closeLogin">
       <template #header>
         <div>
-          <div class="eyebrow">密码登录</div>
+          <div class="eyebrow">密码登录 · 第 {{ loginStep === 'password' ? 1 : 2 }} / 2 步</div>
           <div class="dialog-title">{{ loginAcc?.name }} · {{ loginAcc?.id }}</div>
         </div>
       </template>
-      <el-alert
-        type="warning" :closable="false"
-        title="使用 iCloud 账号的常规密码(不是 App Password)"
-        description="首次登录若启用 2FA 会拒绝,填入 6 位验证码再点一次即可。"
-        style="margin-bottom: 12px"
-      />
-      <el-form label-position="top">
-        <el-form-item label="Apple ID 密码">
-          <el-input v-model="loginForm.password" type="password" show-password />
-        </el-form-item>
-        <el-form-item label="2FA 验证码(有则填)">
-          <el-input v-model="loginForm.otp" placeholder="六位数字" maxlength="6" />
-        </el-form-item>
-      </el-form>
+
+      <template v-if="loginStep === 'password'">
+        <el-alert
+          type="warning" :closable="false"
+          title="用 Apple ID 的常规密码,不是 App Password"
+          description="App Password 只能用于 IMAP 收信,走不通这里的登录流程。账号开了双重认证的话,提交密码之后 Apple 才会把验证码发到受信任设备,下一步再填。"
+          style="margin-bottom: 12px"
+        />
+        <el-form label-position="top" @submit.prevent="submitPassword">
+          <el-form-item label="Apple ID 密码">
+            <el-input
+              v-model="loginForm.password"
+              type="password"
+              show-password
+              @keyup.enter="submitPassword"
+            />
+          </el-form-item>
+        </el-form>
+      </template>
+
+      <template v-else>
+        <el-alert
+          type="info" :closable="false"
+          :title="`验证码已发到 ${loginAppleId || '受信任设备'}`"
+          description="填这台设备上弹出的 6 位数字。这一步复用刚才那次登录会话,不要回去重新提交密码 —— 那会让 Apple 重发一个新码,手上这个当场作废。"
+          style="margin-bottom: 12px"
+        />
+        <el-form label-position="top" @submit.prevent="submitCode">
+          <el-form-item label="验证码">
+            <el-input
+              v-model="loginForm.code"
+              placeholder="六位数字"
+              maxlength="6"
+              inputmode="numeric"
+              autofocus
+              @keyup.enter="submitCode"
+            />
+          </el-form-item>
+        </el-form>
+        <div class="dim small">
+          <template v-if="loginLeft > 0">本次会话剩余 {{ loginLeftText }},超时要从密码重来</template>
+          <template v-else>会话可能已超时,提交后若报失效请从密码重来</template>
+        </div>
+      </template>
+
       <template #footer>
         <el-button plain @click="loginOpen = false">取消</el-button>
-        <el-button type="primary" :loading="loginLoading" @click="submitLogin">登录</el-button>
+        <el-button
+          v-if="loginStep === 'password'"
+          type="primary" :loading="loginLoading" @click="submitPassword"
+        >下一步</el-button>
+        <el-button v-else type="primary" :loading="loginLoading" @click="submitCode">
+          完成登录
+        </el-button>
       </template>
     </el-dialog>
 

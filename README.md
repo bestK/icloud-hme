@@ -299,24 +299,44 @@ POST /api/accounts
 
 #### 账号登录（获取 Cookie）
 
-```bash
-POST /api/accounts/:id/login
+分两步:验证码是 Apple 在密码校验通过之后才发出来的,拿不到就没法跟密码一起提交。
 
-# 请求体
+```bash
+# 第 1 步:提交密码
+POST /api/accounts/:id/login
 {
-  "password": "用户的常规iCloud密码",  # 不是 App Password
-  "otp_code": "123456"                  # 可选,2FA 验证码
+  "password": "用户的常规iCloud密码"   # 不是 App Password
 }
 
-# 响应
+# 开了双重认证 → 码已发到受信任设备,拿 login_id 走第 2 步
 {
   "success": true,
   "data": {
     "id": "acc_1",
-    "cookies": {
-      "x-apple-session-token": "...",
-      "X-APPLE-WEBAUTH-TOKEN": "..."
-    }
+    "status": "needs_2fa",
+    "login_id": "0f4c...",
+    "apple_id": "you@icloud.com",
+    "expires_in": 300
+  }
+}
+
+# 第 2 步:提交验证码(必须带 login_id 复用同一个 Apple 会话,
+# 重新提交密码会让 Apple 重发新码,手上那个当场作废)
+POST /api/accounts/:id/login/verify
+{
+  "login_id": "0f4c...",
+  "code": "123456"
+}
+
+# 登录完成
+{
+  "success": true,
+  "data": {
+    "id": "acc_1",
+    "status": "ok",
+    "cookies_count": 12,
+    "validated": true,
+    "warning": ""
   }
 }
 ```

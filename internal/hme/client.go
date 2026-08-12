@@ -7,6 +7,7 @@ package hme
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -39,6 +40,36 @@ var retryDelays = []time.Duration{
 	1 * time.Second,
 	2500 * time.Millisecond,
 	5 * time.Second,
+}
+
+// UpstreamError 是 iCloud 返回的非 2xx 响应。
+//
+// 调用方用 errors.As 取出 Status 分档处理,不要去错误消息里抠数字 ——
+// 上游响应体里经常也带数字,匹配字符串会误判。
+type UpstreamError struct {
+	Status int    // 上游 HTTP 状态码
+	Body   string // 响应体片段(已截断到 200 字节)
+}
+
+func (e *UpstreamError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body)
+}
+
+// SessionExpired 判断错误是否属于「会话已失效,只有重新登录才有用」这一类。
+// 命中后继续重试纯属白等。
+func SessionExpired(err error) bool {
+	var ue *UpstreamError
+	return errors.As(err, &ue) && isSessionStatus(ue.Status)
+}
+
+// isSessionStatus 列出代表会话不再被 Apple 认可的状态码:
+//   - 401/403: Cookie 失效或权限不足
+//   - 421: Apple 判定这份会话不该发到该服务端点,实际含义是 trust token
+//     已被作废,和 401 一样要重新登录
+func isSessionStatus(code int) bool {
+	return code == http.StatusUnauthorized ||
+		code == http.StatusForbidden ||
+		code == http.StatusMisdirectedRequest
 }
 
 // AccountInfo 是从 /validate 响应中提取的账号身份信息。
@@ -86,6 +117,10 @@ type Client struct {
 func NewClient(cookies map[string]string, host, proxy string, verbose bool) (*Client, error) {
 	if host == "" {
 		host = "icloud.com"
+	}
+	if cookies == nil {
+		// request() 会把响应里的 Set-Cookie 写回这个 map,nil map 会直接 panic
+		cookies = make(map[string]string)
 	}
 	jar := tls_client.NewCookieJar()
 	options := []tls_client.HttpClientOption{
@@ -312,10 +347,11 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 			if len(snippet) > 200 {
 				snippet = snippet[:200]
 			}
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet)
-			// 401/403 说明 Cookie 失效,不重试直接返回。
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
-				return "", lastErr
+			upErr := &UpstreamError{Status: resp.StatusCode, Body: snippet}
+			lastErr = upErr
+			// 会话已经不被认可,重试只会把固定的几秒退避白等一遍。
+			if isSessionStatus(resp.StatusCode) {
+				return "", upErr
 			}
 			if attempt < maxAttempts {
 				c.sleepRetry(attempt)
@@ -523,7 +559,7 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 	if maxRetries <= 0 {
 		maxRetries = 5
 	}
-	var lastErr string
+	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
 			c.serviceURL = ""
@@ -532,9 +568,9 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 		}
 		hme, err := c.Generate()
 		if err != nil {
-			lastErr = "generate 失败: " + err.Error()
+			lastErr = fmt.Errorf("generate 失败: %w", err)
 			c.log("%s", lastErr)
-			if IsRateLimit(lastErr) {
+			if IsRateLimit(err.Error()) || SessionExpired(err) {
 				break
 			}
 			if attempt < maxRetries-1 {
@@ -545,10 +581,11 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 		}
 		email, anonID, err := c.Reserve(hme, label)
 		if err != nil {
-			lastErr = err.Error()
-			c.log("reserve 失败: %s", lastErr)
-			if IsRateLimit(lastErr) {
-				// iCloud 明确限流,继续重试只会加重触发。快速返回。
+			lastErr = err
+			c.log("reserve 失败: %s", err)
+			// iCloud 明确限流时继续重试只会加重触发;会话失效时重试也换不回
+			// 一份有效 Cookie。两种都快速返回。
+			if IsRateLimit(err.Error()) || SessionExpired(err) {
 				break
 			}
 			if attempt < maxRetries-1 {
@@ -575,8 +612,8 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 			CreatedAt:   time.Now().Format(time.RFC3339),
 		}, nil
 	}
-	if lastErr != "" {
-		return nil, fmt.Errorf("创建别名失败: %s", lastErr)
+	if lastErr != nil {
+		return nil, fmt.Errorf("创建别名失败: %w", lastErr)
 	}
 	return nil, fmt.Errorf("创建别名失败,已重试 %d 次", maxRetries)
 }

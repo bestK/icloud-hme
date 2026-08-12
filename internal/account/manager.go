@@ -440,9 +440,24 @@ func (m *Manager) HMEClient(id string, verbose bool) (*hme.Client, error) {
 	return hme.NewClient(acc.Cookies, acc.Host, acc.Proxy, verbose)
 }
 
-// HMEClientWithPassword 为指定账号创建一个新的 HME 客户端,使用账号密码登录。
-// 登录成功后会自动获取 Cookie 并保存到账号配置。
-func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTPProvider) (*hme.Client, error) {
+// LoginResult 描述一次密码登录的结果。
+type LoginResult struct {
+	// Pending 非 nil 表示密码已通过 SRP 校验,但账号开了双重认证,
+	// 验证码已推到受信任设备,要用 LoginFinish 提交验证码才算登录完成。
+	Pending *hme.PendingLogin
+	// CookieCount 是登录拿到的 Cookie 条数(Pending 非 nil 时为 0)。
+	CookieCount int
+	// Validated 表示新 Cookie 已经通过一次 /validate。
+	Validated bool
+	// Warning 记录「Cookie 拿到了但校验没过」的原因,Validated 为 true 时为空。
+	Warning string
+}
+
+// LoginStart 用账号密码发起登录。
+//
+// 返回的 LoginResult.Pending 非 nil 时登录还没完成,调用方要拿着它去 LoginFinish
+// 提交验证码 —— 中间不能重新发起登录,那会让 Apple 重发一个码把旧的作废。
+func (m *Manager) LoginStart(id, password string) (*LoginResult, error) {
 	m.mu.Lock()
 	acc, ok := m.accounts[id]
 	m.mu.Unlock()
@@ -455,7 +470,7 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 		email = acc.RealEmail
 	}
 	if email == "" {
-		return nil, fmt.Errorf("账号未设置邮箱地址")
+		return nil, fmt.Errorf("账号未设置邮箱地址,先粘一次 Cookie 或设置 App Password 把邮箱补上")
 	}
 
 	client, err := hme.NewClient(nil, acc.Host, acc.Proxy, true)
@@ -463,17 +478,64 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 		return nil, err
 	}
 
-	if err := client.Login(email, password, otpProvider); err != nil {
+	pending, err := client.BeginLogin(email, password)
+	if err != nil {
 		return nil, err
 	}
+	if pending != nil {
+		return &LoginResult{Pending: pending}, nil
+	}
+	return m.adoptSession(id, client), nil
+}
 
-	// 保存登录后的 Cookie 到账号
+// LoginFinish 提交双重认证验证码,完成 pending 那次登录并把 Cookie 落盘。
+func (m *Manager) LoginFinish(id string, pending *hme.PendingLogin, code string) (*LoginResult, error) {
+	if pending == nil {
+		return nil, fmt.Errorf("没有待验证的登录")
+	}
+	if err := pending.Submit(code); err != nil {
+		return nil, err
+	}
+	return m.adoptSession(id, pending.Client()), nil
+}
+
+// adoptSession 接收一次登录拿到的会话:Cookie 落盘,再校验一次并校准别名计数。
+//
+// 校验失败不算登录失败 —— Cookie 确实拿到了,只是这份会话马上就用不了。
+// 结果写进 LoginResult.Warning,由调用方决定怎么呈现。
+func (m *Manager) adoptSession(id string, client *hme.Client) *LoginResult {
+	res := &LoginResult{CookieCount: len(client.Cookies)}
+
+	if err := m.SaveCookies(id, client.Cookies); err != nil {
+		res.Warning = "Cookie 保存失败: " + err.Error()
+		return res
+	}
+	if err := client.ValidateSession(); err != nil {
+		res.Warning = "新 Cookie 校验没通过: " + err.Error()
+		m.markError(id, "登录后校验失败: "+err.Error())
+		return res
+	}
+
 	m.mu.Lock()
-	acc.Cookies = client.Cookies
-	m.save()
+	if acc, ok := m.accounts[id]; ok {
+		acc.Status = "active"
+		acc.LastError = ""
+		acc.LastValidated = time.Now().Format(time.RFC3339)
+		if info := client.AccountInfo(); info != nil {
+			acc.RealEmail = firstNonEmpty(info.AppleID, info.PrimaryEmail)
+			if acc.ICloudEmail == "" {
+				acc.ICloudEmail = deriveICloudEmail(info)
+			}
+		}
+		_ = m.save()
+	}
 	m.mu.Unlock()
 
-	return client, nil
+	// 计数是展示用的,校准失败不影响登录成功这件事
+	_, _, _ = m.RefreshAliasCounts(id, client)
+
+	res.Validated = true
+	return res
 }
 
 // MailClient 为指定账号创建 IMAP 邮件客户端。

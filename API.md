@@ -14,9 +14,11 @@ HTTP JSON API，所有接口返回统一格式：
 
 **错误响应:**
 - `400 Bad Request` — 参数错误
-- `401 Unauthorized` — 会话失效 / 缺 token / token 无效
+- `401 Unauthorized` — 缺 token / token 无效,或 iCloud 会话失效(后者带 `scope: "upstream"`)
 - `403 Forbidden` — 非 admin 尝试调用 admin only 接口
 - `404 Not Found` — 账号或别名不存在(user 尝试操作不属于自己的别名也返回 404)
+- `410 Gone` — 待验证的登录会话已超时(见密码登录第 2 步)
+- `429 Too Many Requests` — iCloud 限流
 - `502 Bad Gateway` — iCloud 服务错误
 
 ## 鉴权
@@ -272,41 +274,71 @@ Content-Type: application/json
 
 ### 5. 账号密码登录（获取 Cookie）
 
+分两步:先提交密码,Apple 校验通过后才会把验证码发到受信任设备,再提交验证码。
+
+**第 1 步 — 提交密码**
+
 ```http
 POST /api/accounts/:id/login
 Content-Type: application/json
 
 {
-  "password": "用户的常规iCloud密码",
-  "otp_code": "123456"  // 可选,2FA 验证码
+  "password": "用户的常规iCloud密码"
 }
 ```
 
 **参数说明:**
 - `:id` (路径参数) — 账号 ID
 - `password` (必填) — iCloud 账号的常规密码(**不是** App Password)
-- `otp_code` (可选) — 双重认证验证码
 
-**响应:**
+**响应 A — 账号没开双重认证,登录已完成:**
 ```json
 {
   "success": true,
   "data": {
     "id": "acc_1",
-    "cookies": {
-      "x-apple-session-token": "...",
-      "X-APPLE-WEBAUTH-TOKEN": "...",
-      "X-APPLE-WEBAUTH-USER": "..."
-    }
+    "status": "ok",
+    "cookies_count": 12,
+    "validated": true,
+    "warning": ""
   }
 }
 ```
 
+**响应 B — 需要验证码,此时 Apple 已经把码发出去了:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "acc_1",
+    "status": "needs_2fa",
+    "login_id": "0f4c...",
+    "apple_id": "you@icloud.com",
+    "expires_in": 300
+  }
+}
+```
+
+**第 2 步 — 提交验证码**
+
+```http
+POST /api/accounts/:id/login/verify
+Content-Type: application/json
+
+{
+  "login_id": "0f4c...",
+  "code": "123456"
+}
+```
+
+响应同上面的响应 A。`410 Gone` 表示那份待验证会话超时或已用过,要从第 1 步重来。
+
 **注意事项:**
-- 密码是登录 appleid.apple.com 的**常规账号密码**,不是 App 专用密码
+- 密码是登录 appleid.apple.com 的**常规账号密码**,不是 App 专用密码。App Password 只能用于 IMAP 收信,走不通 SRP 登录
 - 登录前账号必须已设置 `icloud_email` 字段
-- 登录成功后 Cookie 会自动保存到 accounts.json
-- 启用 2FA 时,第一次请求会被拒绝,需要带 `otp_code` 重试
+- 第 2 步必须带第 1 步返回的 `login_id`:两步复用同一个 Apple 会话。**不能重新提交密码** —— 那会让 Apple 重发一个新码,用户手上那个当场作废
+- `login_id` 存在服务端内存里,有效期 `expires_in` 秒,进程重启即失效
+- 登录成功后 Cookie 自动保存到 accounts.json,并立刻校验一次:`validated` 为 false 时 `warning` 里是原因(Cookie 存下来了,但这份会话用不了)
 
 ---
 
@@ -603,27 +635,53 @@ for alias in resp.json()["data"]["aliases"]:
 
 ## 错误处理
 
+上游(iCloud)报错时,响应里多两个字段:
+
+| 字段 | 含义 |
+| --- | --- |
+| `scope` | 固定为 `"upstream"`,表示失败的是 iCloud 会话而不是本服务的 token。401 靠它区分「该重新登录 iCloud」和「面板 token 无效」 |
+| `upstream_status` | iCloud 返回的**原始**状态码。对外的状态码是映射过的,排查要看这个 |
+
 ### 会话失效 (401)
 
 ```json
 {
   "success": false,
-  "message": "iCloud 会话失效，请更新 Cookie: HTTP 401"
+  "message": "拉取别名列表失败: iCloud 会话失效,需要重新登录换 Cookie — HTTP 421: ...",
+  "scope": "upstream",
+  "upstream_status": 421
 }
 ```
 
-**解决:** 更新 `accounts.json` 中的 Cookie
+**解决:** 重新登录该账号换一份 Cookie(密码登录或粘贴浏览器 Cookie)。
+
+上游 401 / 403 / 421 都归到这一档。421 不原样透传:它在 HTTP/2 里有连接层语义,
+客户端可能拿它去换条连接重试,原始码放在 `upstream_status` 里。这三个状态码在客户端
+内部也不重试 —— 会话已经不被 Apple 认可,重试只是白等退避时间。
+
+### iCloud 限流 (429)
+
+```json
+{
+  "success": false,
+  "message": "创建邮箱失败: iCloud 限流,请稍后重试 — HTTP 429: ...",
+  "scope": "upstream",
+  "upstream_status": 429
+}
+```
 
 ### iCloud 服务错误 (502)
 
 ```json
 {
   "success": false,
-  "message": "创建邮箱失败: HTTP 429"
+  "message": "创建邮箱失败: HTTP 503: ...",
+  "scope": "upstream",
+  "upstream_status": 503
 }
 ```
 
-**说明:** 429 错误会自动重试最多 5 次
+**说明:** 这一档会自动重试(单次请求最多 3 次,创建别名整体最多 5 轮)
 
 ### 参数错误 (400)
 

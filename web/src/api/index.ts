@@ -1,6 +1,6 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios'
 import type {
-  Account, Alias, CreateResult, MailMessage, PoolView, Role, TokenView,
+  Account, Alias, CreateResult, LoginDone, LoginResponse, MailMessage, PoolView, Role, TokenView,
 } from '@/types'
 
 const TOKEN_KEY = 'hme_token'
@@ -32,15 +32,43 @@ http.interceptors.request.use((cfg) => {
   return cfg
 })
 
+/** 带上后端状态码和 iCloud 原始状态码的错误,message 是后端给的可读原因 */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly upstreamStatus?: number,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+interface ErrBody {
+  success: false
+  message?: string
+  /** "upstream" = iCloud 会话的问题,不是面板 token 的问题 */
+  scope?: string
+  upstream_status?: number
+}
+
 http.interceptors.response.use(
   (resp) => resp,
-  (err: AxiosError<{ success: false; message?: string }>) => {
-    if (err.response?.status === 401) {
+  (err: AxiosError<ErrBody>) => {
+    const body = err.response?.data
+    // 401 有两种:面板 token 失效(该踢回登录页)和 iCloud 会话失效(只该报错)。
+    // 不分开的话,一个账号 Cookie 过期就会把管理员从面板上挤下去。
+    if (err.response?.status === 401 && body?.scope !== 'upstream') {
       setToken('')
       setRole('')
       if (!location.pathname.startsWith('/login')) {
         location.assign('/login')
       }
+    }
+    // axios 默认的 message 是 "Request failed with status code 502",
+    // 什么信息都没有;后端把可读原因放在 body.message 里。
+    if (body?.message) {
+      return Promise.reject(new ApiError(body.message, err.response?.status, body.upstream_status))
     }
     return Promise.reject(err)
   },
@@ -79,9 +107,15 @@ export const api = {
       (await http.put(`/accounts/${id}/cookies`, { cookies })).data,
     ),
 
-  loginAccount: async (id: string, password: string, otpCode?: string) =>
-    unwrap<{ id: string; cookies: Record<string, string> }>(
-      (await http.post(`/accounts/${id}/login`, { password, otp_code: otpCode })).data,
+  // 第一步:提交密码。开了 2FA 会返回 needs_2fa,此时验证码已经发到受信任设备,
+  // 拿着 login_id 走 verifyLogin —— 不能重新提交密码,那会让 Apple 重发新码。
+  loginAccount: async (id: string, password: string) =>
+    unwrap<LoginResponse>((await http.post(`/accounts/${id}/login`, { password })).data),
+
+  // 第二步:提交受信任设备上收到的验证码
+  verifyLogin: async (id: string, loginId: string, code: string) =>
+    unwrap<LoginDone>(
+      (await http.post(`/accounts/${id}/login/verify`, { login_id: loginId, code })).data,
     ),
 
   revalidateAccount: async (id: string) =>

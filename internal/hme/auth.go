@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 
@@ -35,13 +36,9 @@ const (
 	authValidateFmt = "https://setup.icloud.com/setup/ws/1/validate?clientBuildNumber=%s&clientMasteringNumber=%s&clientId=%s"
 )
 
-// OTPProvider 双重认证回调函数,返回 2FA 验证码
-type OTPProvider func() (string, error)
-
 // authState 保存认证过程中的状态
 type authState struct {
 	username   string
-	password   string
 	frameId    string
 	clientId   string
 	authAttr   string
@@ -52,24 +49,39 @@ type authState struct {
 	dsid       string
 }
 
-// Login 使用 iCloud 账号密码登录,获取 session token Cookie。
+// PendingLogin 是一次卡在双重认证上的登录:密码已经通过 SRP 校验,
+// Apple 已经把验证码推到受信任设备,等着提交。
 //
-// 登录成功后,可以通过 client.GetCookies() 获取 Cookie。
-// 启用 2FA 时,会调用 otpProvider 获取验证码。
-func (c *Client) Login(username, password string, otpProvider OTPProvider) error {
-	state := &authState{
-		username: username,
-		password: password,
-	}
+// 它必须复用发起登录的那个 Client —— sessionID / scnt 和 cookie jar 都绑在
+// 那一次会话上。重新走一遍 SRP 会让 Apple 重发一个新码,用户手上那个当场作废,
+// 所以「填了验证码再点一次登录」这种交互是走不通的。
+type PendingLogin struct {
+	c     *Client
+	state *authState
+}
+
+// Client 返回承载这次登录的客户端。Submit 成功后 Cookie 就在它的 Cookies 里。
+func (p *PendingLogin) Client() *Client { return p.c }
+
+// Username 返回这次登录用的 Apple ID。
+func (p *PendingLogin) Username() string { return p.state.username }
+
+// BeginLogin 用 iCloud 账号密码走完 SRP 校验。
+//
+// 返回值 *PendingLogin 非 nil 表示账号启用了双重认证,验证码已发到受信任设备,
+// 需要再调用 PendingLogin.Submit 提交验证码才算登录完成;为 nil 表示登录已完成,
+// Cookie 可以直接从 c.Cookies 取。
+func (c *Client) BeginLogin(username, password string) (*PendingLogin, error) {
+	state := &authState{username: username}
 
 	// 1. 初始化 frameId 和 clientId
 	if err := c.authStart(state); err != nil {
-		return fmt.Errorf("auth start: %w", err)
+		return nil, fmt.Errorf("auth start: %w", err)
 	}
 
 	// 2. 提交用户名
 	if err := c.authFederate(state); err != nil {
-		return fmt.Errorf("auth federate: %w", err)
+		return nil, fmt.Errorf("auth federate: %w", err)
 	}
 
 	// 3. SRP 协议初始化
@@ -80,17 +92,17 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 	// 4. 获取 salt 和 B
 	authInitResp, err := c.authInit(state, base64.StdEncoding.EncodeToString(srpClient.GetABytes()))
 	if err != nil {
-		return fmt.Errorf("auth init: %w", err)
+		return nil, fmt.Errorf("auth init: %w", err)
 	}
 
 	// 5. 解码 salt 和 B
 	bDec, err := base64.StdEncoding.DecodeString(authInitResp.B)
 	if err != nil {
-		return fmt.Errorf("decode B: %w", err)
+		return nil, fmt.Errorf("decode B: %w", err)
 	}
 	saltDec, err := base64.StdEncoding.DecodeString(authInitResp.Salt)
 	if err != nil {
-		return fmt.Errorf("decode salt: %w", err)
+		return nil, fmt.Errorf("decode salt: %w", err)
 	}
 
 	// 6. 生成密码密钥
@@ -101,24 +113,36 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 	srpClient.ProcessClientChanllenge([]byte(username), passKey, saltDec, bDec)
 
 	// 8. 提交 SRP 响应 (可能触发 2FA)
-	if err := c.authComplete(state, base64.StdEncoding.EncodeToString(srpClient.M1), base64.StdEncoding.EncodeToString(srpClient.M2), otpProvider); err != nil {
-		return fmt.Errorf("auth complete: %w", err)
+	needs2FA, err := c.authComplete(state, base64.StdEncoding.EncodeToString(srpClient.M1), base64.StdEncoding.EncodeToString(srpClient.M2))
+	if err != nil {
+		return nil, fmt.Errorf("auth complete: %w", err)
+	}
+	if needs2FA {
+		c.log("账号启用了双重认证,等待验证码")
+		return &PendingLogin{c: c, state: state}, nil
 	}
 
-	// 9. 信任设备
+	return nil, c.finishLogin(state)
+}
+
+// Submit 提交 2FA 验证码并完成登录。
+func (p *PendingLogin) Submit(code string) error {
+	if err := p.c.submitSecurityCode(p.state, code); err != nil {
+		return err
+	}
+	return p.c.finishLogin(p.state)
+}
+
+// finishLogin 走「信任设备 → 换 iCloud Web Cookie」,收尾一次登录。
+func (c *Client) finishLogin(state *authState) error {
 	if err := c.getTrust(state); err != nil {
 		return fmt.Errorf("get trust: %w", err)
 	}
-
-	// 10. 获取 iCloud Web 服务 Cookie
 	if err := c.authenticateWeb(state); err != nil {
 		return fmt.Errorf("authenticate web: %w", err)
 	}
-
-	// 11. 保存 Cookie 到 Client
-	cookies := c.extractSessionCookies()
-	c.Cookies = cookies
-	c.log("登录成功,获取到 %d 个 Cookie", len(cookies))
+	c.Cookies = c.extractSessionCookies()
+	c.log("登录成功,获取到 %d 个 Cookie", len(c.Cookies))
 	return nil
 }
 
@@ -217,8 +241,9 @@ func (c *Client) authInit(state *authState, a string) (*authInitResp, error) {
 	return &result, nil
 }
 
-// authComplete 提交 SRP 响应
-func (c *Client) authComplete(state *authState, m1, m2 string, otpProvider OTPProvider) error {
+// authComplete 提交 SRP 响应。needs2FA 为 true 时,验证码已发出,
+// state 里的 sessionID / scnt 已经填好,可以直接提交验证码。
+func (c *Client) authComplete(state *authState, m1, m2 string) (needs2FA bool, err error) {
 	reqBody := map[string]interface{}{
 		"accountName": state.username,
 		"rememberMe":  true,
@@ -230,12 +255,12 @@ func (c *Client) authComplete(state *authState, m1, m2 string, otpProvider OTPPr
 
 	data, err := json.Marshal(reqBody)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	req, err := http.NewRequest("POST", authComplete, bytes.NewReader(data))
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -243,42 +268,34 @@ func (c *Client) authComplete(state *authState, m1, m2 string, otpProvider OTPPr
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case 200:
-		return nil
+		return false, nil
 	case 409:
-		// 需要 2FA
-		return c.handleTwoFactor(state, resp, otpProvider)
+		// 需要 2FA:留下 sessionID / scnt,后续提交验证码要带
+		state.sessionID = resp.Header.Get("X-Apple-ID-Session-Id")
+		state.scnt = resp.Header.Get("scnt")
+		if state.sessionID == "" {
+			return false, fmt.Errorf("需要双重认证,但响应里没有 X-Apple-ID-Session-Id")
+		}
+		return true, nil
 	case 403:
-		return fmt.Errorf("用户名或密码错误")
+		return false, fmt.Errorf("用户名或密码错误")
 	case 412:
-		return fmt.Errorf("需要先在 appleid.apple.com 同意隐私条款")
+		return false, fmt.Errorf("需要先在 appleid.apple.com 同意隐私条款")
 	default:
-		return fmt.Errorf("auth complete 失败: HTTP %d", resp.StatusCode)
+		return false, fmt.Errorf("auth complete 失败: HTTP %d", resp.StatusCode)
 	}
 }
 
-// handleTwoFactor 处理双重认证
-func (c *Client) handleTwoFactor(state *authState, signinResp *http.Response, otpProvider OTPProvider) error {
-	state.sessionID = signinResp.Header.Get("X-Apple-ID-Session-Id")
-	state.scnt = signinResp.Header.Get("scnt")
-
-	if otpProvider == nil {
-		return fmt.Errorf("账号启用了双重认证,需要提供 OTP")
-	}
-
-	otp, err := otpProvider()
-	if err != nil {
-		return fmt.Errorf("获取 2FA 验证码失败: %w", err)
-	}
-
-	// 提交 2FA 验证码
+// submitSecurityCode 提交受信任设备上收到的 6 位验证码。
+func (c *Client) submitSecurityCode(state *authState, code string) error {
 	reqBody := map[string]interface{}{
-		"securityCode": map[string]string{"code": otp},
+		"securityCode": map[string]string{"code": code},
 	}
 
 	data, _ := json.Marshal(reqBody)
@@ -297,7 +314,17 @@ func (c *Client) handleTwoFactor(state *authState, signinResp *http.Response, ot
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 204 {
-		return fmt.Errorf("2FA 验证失败: HTTP %d", resp.StatusCode)
+		raw, _ := io.ReadAll(resp.Body)
+		snippet := strings.TrimSpace(string(raw))
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		// Apple 对错码返 400。这一步失败后 sessionID 就废了,只能重新发起登录
+		// 让它重发一个码。
+		if resp.StatusCode == 400 {
+			return fmt.Errorf("验证码错误或已过期,请重新发起登录 — %s", snippet)
+		}
+		return fmt.Errorf("2FA 验证失败: HTTP %d — %s", resp.StatusCode, snippet)
 	}
 
 	if newScnt := resp.Header.Get("scnt"); newScnt != "" {

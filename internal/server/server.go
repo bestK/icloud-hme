@@ -8,12 +8,15 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"icloud-hme/internal/account"
 	"icloud-hme/internal/hme"
 	"icloud-hme/internal/mail"
@@ -29,6 +32,11 @@ type Server struct {
 	pool   *pool.Store
 	filler *pool.Filler
 	r      *gin.Engine
+
+	// 等待 2FA 验证码的登录。密码那一步和验证码那一步之间必须复用同一个
+	// Apple 会话,所以只能把它挂在内存里(进程重启后作废,重新登录即可)。
+	loginsMu sync.Mutex
+	logins   map[string]*pendingLogin
 }
 
 // New 创建 Server。debug 为 true 时启用 Gin 调试日志。
@@ -36,7 +44,13 @@ func New(mgr *account.Manager, tokens *token.Store, poolStore *pool.Store, fille
 	if !debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	s := &Server{mgr: mgr, tokens: tokens, pool: poolStore, filler: filler}
+	s := &Server{
+		mgr:    mgr,
+		tokens: tokens,
+		pool:   poolStore,
+		filler: filler,
+		logins: make(map[string]*pendingLogin),
+	}
 	s.r = gin.Default() // 自带 Logger + Recovery 中间件
 	s.register()
 	web.Attach(s.r) // 挂管理面板静态资源(embed)
@@ -62,6 +76,7 @@ func (s *Server) register() {
 	adm.POST("/accounts/:id/password", s.setAppPassword)
 	adm.PUT("/accounts/:id/cookies", s.updateCookies)
 	adm.POST("/accounts/:id/login", s.loginAccount)
+	adm.POST("/accounts/:id/login/verify", s.verifyLogin)
 	adm.POST("/accounts/:id/revalidate", s.revalidateAccount)
 	adm.POST("/reload", s.reloadConfig)
 	adm.GET("/tokens", s.listTokens)
@@ -84,6 +99,12 @@ type apiResp struct {
 	Success bool        `json:"success"`
 	Message string      `json:"message,omitempty"`
 	Data    interface{} `json:"data,omitempty"`
+	// Scope 标明是谁的凭证不行:缺省是面板自己的 token,"upstream" 是 iCloud 会话。
+	// 两者都会返 401,前端靠它决定该把用户踢回登录页,还是只报个错。
+	Scope string `json:"scope,omitempty"`
+	// UpstreamStatus 是 iCloud 返回的原始状态码。我们对外的状态码是映射过的
+	// (比如 421 → 401),排查时需要看到没被改写的那个。
+	UpstreamStatus int `json:"upstream_status,omitempty"`
 }
 
 func ok(c *gin.Context, data interface{}) {
@@ -94,21 +115,37 @@ func fail(c *gin.Context, code int, msg string) {
 	c.JSON(code, apiResp{Success: false, Message: msg})
 }
 
+func failWithUpstream(c *gin.Context, code, upstream int, msg string) {
+	c.JSON(code, apiResp{Success: false, Message: msg, Scope: "upstream", UpstreamStatus: upstream})
+}
+
 // failUpstream 把 iCloud 上游返回的错误统一映射为 HTTP 状态码:
-//   - 会话失效(401/403/session/cookie/认证等关键字) → 401
-//   - 限流(hme.IsRateLimit) → 429
+//   - 会话失效(401/403/421) → 401
+//   - 限流(上游 429 或 hme.IsRateLimit) → 429
 //   - 其他上游错误 → 502
+//
+// 分档优先看 hme.UpstreamError 里的状态码;拿不到(比如 IMAP / Web 邮件客户端
+// 自己拼的错误)才退回关键字匹配。421 不原样透传:它在 HTTP/2 里有连接层语义,
+// 浏览器可能拿它去换条连接重试,原始码放在 upstream_status 里。
 //
 // prefix 用于给用户提供操作上下文,比如"创建邮箱失败"。
 func failUpstream(c *gin.Context, prefix string, err error) {
 	msg := err.Error()
+	upstream := 0
+	var ue *hme.UpstreamError
+	if errors.As(err, &ue) {
+		upstream = ue.Status
+	}
+
 	switch {
-	case isSessionError(msg):
-		fail(c, http.StatusUnauthorized, prefix+": iCloud 会话失效,请更新 Cookie — "+msg)
-	case hme.IsRateLimit(msg):
-		fail(c, http.StatusTooManyRequests, prefix+": iCloud 限流,请稍后重试 — "+msg)
+	case hme.SessionExpired(err) || (upstream == 0 && isSessionError(msg)):
+		failWithUpstream(c, http.StatusUnauthorized, upstream,
+			prefix+": iCloud 会话失效,需要重新登录换 Cookie — "+msg)
+	case upstream == http.StatusTooManyRequests || hme.IsRateLimit(msg):
+		failWithUpstream(c, http.StatusTooManyRequests, upstream,
+			prefix+": iCloud 限流,请稍后重试 — "+msg)
 	default:
-		fail(c, http.StatusBadGateway, prefix+": "+msg)
+		failWithUpstream(c, http.StatusBadGateway, upstream, prefix+": "+msg)
 	}
 }
 
@@ -373,9 +410,68 @@ func (s *Server) updateCookies(c *gin.Context) {
 	ok(c, gin.H{"id": id, "cookies_count": len(req.Cookies)})
 }
 
+// ====================================================================
+// 密码登录:两步
+//
+//   POST /accounts/:id/login         body: {"password": "..."}
+//     → 无 2FA: {"status":"ok", ...}
+//     → 有 2FA: {"status":"needs_2fa","login_id":"..."} ,验证码此时已发到设备
+//   POST /accounts/:id/login/verify  body: {"login_id":"...","code":"123456"}
+//     → {"status":"ok", ...}
+//
+// 为什么必须分两步:验证码是 Apple 在密码通过之后才发的,用户不可能在提交密码
+// 之前就拿到它。而且第二步必须复用第一步那个 Apple 会话 —— 重新走一遍密码流程
+// 会让 Apple 重发一个新码,用户手上的码当场作废。
+// ====================================================================
+
+// pendingLoginTTL 是待验证登录在服务端的存活时间。
+// 每个待验证会话占着一个 TLS 客户端,不能无限留。
+const pendingLoginTTL = 5 * time.Minute
+
+type pendingLogin struct {
+	accountID string
+	pending   *hme.PendingLogin
+	expiresAt time.Time
+}
+
+// putPendingLogin 存一个待验证登录,返回给客户端的句柄,顺手清掉过期的。
+func (s *Server) putPendingLogin(accountID string, p *hme.PendingLogin) string {
+	loginID := uuid.New().String()
+	now := time.Now()
+
+	s.loginsMu.Lock()
+	defer s.loginsMu.Unlock()
+	for k, v := range s.logins {
+		// 同一个账号只保留最新那次:旧会话里的码已经被新的一次登录顶掉了
+		if v.expiresAt.Before(now) || v.accountID == accountID {
+			delete(s.logins, k)
+		}
+	}
+	s.logins[loginID] = &pendingLogin{
+		accountID: accountID,
+		pending:   p,
+		expiresAt: now.Add(pendingLoginTTL),
+	}
+	return loginID
+}
+
+// takePendingLogin 取出并移除待验证登录。取不到说明超时了或者句柄对不上账号。
+func (s *Server) takePendingLogin(accountID, loginID string) (*hme.PendingLogin, bool) {
+	s.loginsMu.Lock()
+	defer s.loginsMu.Unlock()
+	entry, ok := s.logins[loginID]
+	if !ok || entry.accountID != accountID {
+		return nil, false
+	}
+	delete(s.logins, loginID)
+	if entry.expiresAt.Before(time.Now()) {
+		return nil, false
+	}
+	return entry.pending, true
+}
+
 type loginReq struct {
 	Password string `json:"password" binding:"required"`
-	OTPCode  string `json:"otp_code"` // 可选 2FA 验证码
 }
 
 func (s *Server) loginAccount(c *gin.Context) {
@@ -386,24 +482,61 @@ func (s *Server) loginAccount(c *gin.Context) {
 		return
 	}
 
-	var otpProvider hme.OTPProvider
-	if req.OTPCode != "" {
-		otp := req.OTPCode
-		otpProvider = func() (string, error) {
-			return otp, nil
-		}
-	}
-
-	client, err := s.mgr.HMEClientWithPassword(id, req.Password, otpProvider)
+	res, err := s.mgr.LoginStart(id, req.Password)
 	if err != nil {
 		failUpstream(c, "登录失败", err)
 		return
 	}
+	if res.Pending != nil {
+		ok(c, gin.H{
+			"id":         id,
+			"status":     "needs_2fa",
+			"login_id":   s.putPendingLogin(id, res.Pending),
+			"apple_id":   res.Pending.Username(),
+			"expires_in": int(pendingLoginTTL.Seconds()),
+		})
+		return
+	}
+	ok(c, loginDone(id, res))
+}
 
-	ok(c, gin.H{
-		"id":      id,
-		"cookies": client.Cookies,
-	})
+type verifyLoginReq struct {
+	LoginID string `json:"login_id" binding:"required"`
+	Code    string `json:"code" binding:"required"`
+}
+
+func (s *Server) verifyLogin(c *gin.Context) {
+	id := c.Param("id")
+	var req verifyLoginReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "参数错误: login_id, code 必填 — "+err.Error())
+		return
+	}
+
+	pending, found := s.takePendingLogin(id, req.LoginID)
+	if !found {
+		fail(c, http.StatusGone, "登录会话已失效(超过 "+strconv.Itoa(int(pendingLoginTTL.Minutes()))+" 分钟或已用过),请重新输密码发起登录")
+		return
+	}
+
+	res, err := s.mgr.LoginFinish(id, pending, strings.TrimSpace(req.Code))
+	if err != nil {
+		failUpstream(c, "验证码校验失败", err)
+		return
+	}
+	ok(c, loginDone(id, res))
+}
+
+// loginDone 组装登录完成的响应。不回传 Cookie 明文 —— 前端不需要,
+// 回传只是让一份完整的 iCloud 会话多走一趟网络。
+func loginDone(id string, res *account.LoginResult) gin.H {
+	return gin.H{
+		"id":            id,
+		"status":        "ok",
+		"cookies_count": res.CookieCount,
+		"validated":     res.Validated,
+		"warning":       res.Warning,
+	}
 }
 
 // revalidateAccount 重新校验会话并把别名计数拉平到上游真实值。
@@ -573,7 +706,8 @@ func (s *Server) deleteAlias(c *gin.Context) {
 	ok(c, gin.H{"anonymous_id": anonymousID})
 }
 
-// isSessionError 判断错误是否由会话失效引起。
+// isSessionError 按关键字判断错误是否由会话失效引起。
+// 只在拿不到上游状态码时用 —— 响应体里也可能出现 401 这种数字,会误判。
 func isSessionError(msg string) bool {
 	m := strings.ToLower(msg)
 	return strings.Contains(m, "401") || strings.Contains(m, "403") ||
