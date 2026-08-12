@@ -2,21 +2,26 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '@/api'
-import type { Account, PoolView, TokenView } from '@/types'
+import type { Account, FillerStatus, PoolView, TokenView } from '@/types'
 import PoolDepthCard from '@/components/PoolDepthCard.vue'
+import FillerStatusCard from '@/components/FillerStatusCard.vue'
 
 const accounts = ref<Account[]>([])
 const pools = ref<PoolView[]>([])
 const tokens = ref<TokenView[]>([])
+const filler = ref<FillerStatus | null>(null)
 const loading = ref(false)
 
 async function load() {
   loading.value = true
   try {
-    const [a, p, t] = await Promise.all([api.listAccounts(), api.listPool(), api.listTokens()])
+    const [a, p, t, f] = await Promise.all([
+      api.listAccounts(), api.listPool(), api.listTokens(), api.fillerStatus(),
+    ])
     accounts.value = a
     pools.value = p
     tokens.value = t
+    filler.value = f
   } catch (e: any) {
     ElMessage.error(e?.message || '加载失败')
   } finally {
@@ -43,6 +48,7 @@ onMounted(load)
     </div>
 
     <div class="stack">
+      <FillerStatusCard :status="filler" @due="load" />
       <PoolDepthCard v-for="p in pools" :key="p.account_id" :view="p" />
     </div>
 

@@ -83,6 +83,7 @@ func (s *Server) register() {
 	adm.POST("/tokens", s.createToken)
 	adm.DELETE("/tokens/:id", s.deleteToken)
 	adm.GET("/pool", s.listPool)
+	adm.GET("/pool/filler", s.fillerStatus)
 
 	// admin + user 都能调,内部按 role 做数据隔离
 	api.POST("/create", s.createAlias)
@@ -827,10 +828,14 @@ func (s *Server) deleteToken(c *gin.Context) {
 
 type poolView struct {
 	AccountID string `json:"account_id"`
-	Depth     int    `json:"depth"`
-	Target    int    `json:"target"`
-	HourUsed  int    `json:"hour_used"`
-	HourlyMax int    `json:"hourly_max"`
+	// AccountName / AccountStatus:光给 acc_xxxxxxxx 看不出这是哪个账号,
+	// 状态也决定了补池会不会跳过它
+	AccountName   string `json:"account_name,omitempty"`
+	AccountStatus string `json:"account_status,omitempty"`
+	Depth         int    `json:"depth"`
+	Target        int    `json:"target"`
+	HourUsed      int    `json:"hour_used"`
+	HourlyMax     int    `json:"hourly_max"`
 }
 
 func (s *Server) listPool(c *gin.Context) {
@@ -852,11 +857,13 @@ func (s *Server) listPool(c *gin.Context) {
 	for _, acc := range accs {
 		seen[acc.ID] = true
 		out = append(out, poolView{
-			AccountID: acc.ID,
-			Depth:     depths[acc.ID],
-			Target:    target,
-			HourUsed:  s.pool.HourUsage(acc.ID),
-			HourlyMax: hourlyMax,
+			AccountID:     acc.ID,
+			AccountName:   acc.Name,
+			AccountStatus: acc.Status,
+			Depth:         depths[acc.ID],
+			Target:        target,
+			HourUsed:      s.pool.HourUsage(acc.ID),
+			HourlyMax:     hourlyMax,
 		})
 	}
 	// 处理已经删除但池里还残留的账号(异常情况)
@@ -867,4 +874,15 @@ func (s *Server) listPool(c *gin.Context) {
 		out = append(out, poolView{AccountID: id, Depth: depth, Target: target, HourUsed: s.pool.HourUsage(id), HourlyMax: hourlyMax})
 	}
 	ok(c, out)
+}
+
+// fillerStatus 汇报定时补池的运行情况:开没开、上一轮几点跑的补了几个、
+// 下一轮几点跑。池深度自己会变,但看不到调度器就没法判断它是在正常工作
+// 还是早就停了。
+func (s *Server) fillerStatus(c *gin.Context) {
+	if s.filler == nil {
+		ok(c, pool.Status{})
+		return
+	}
+	ok(c, s.filler.Status())
 }

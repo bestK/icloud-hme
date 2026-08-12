@@ -22,6 +22,11 @@ const creating = ref(false)
 const created = ref<CreateResult | null>(null)
 const createdOpen = ref(false)
 
+// 弹窗里要说清这个地址落在哪个账号名下,只给 acc_xxxxxxxx 看不出来
+const createdAccountName = computed(
+  () => accounts.value.find((a) => a.id === created.value?.account_id)?.name ?? '',
+)
+
 const emptyHint = computed(() =>
   accountId.value ? '还没有别名 — 点右上"新建别名"开始' : '选择一个 iCloud 账号',
 )
@@ -203,7 +208,12 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <AliasCreated :result="created" :open="createdOpen" @close="createdOpen = false" />
+    <AliasCreated
+      :result="created"
+      :open="createdOpen"
+      :account-name="createdAccountName"
+      @close="createdOpen = false"
+    />
   </section>
 </template>
 

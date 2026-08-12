@@ -43,10 +43,31 @@ export interface CreateResult {
 
 export interface PoolView {
   account_id: string
+  account_name?: string
+  /** 非 active 的账号会被定时补池跳过 */
+  account_status?: string
   depth: number
   target: number
   hour_used: number
   hourly_max: number
+}
+
+/** 定时补池调度器的运行快照 */
+export interface FillerStatus {
+  enabled: boolean
+  running: boolean
+  target: number
+  hourly_max: number
+  interval_seconds: number
+  /** 为空表示还没跑过第一轮 */
+  last_run_at?: string
+  next_run_at?: string
+  /** 上一轮补进池子的个数 */
+  last_added: number
+  /** 本次进程启动以来累计补的个数 */
+  total_added: number
+  last_error?: string
+  last_error_at?: string
 }
 
 /** 密码登录完成 */

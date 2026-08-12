@@ -2,7 +2,12 @@
 import { ElMessage } from 'element-plus'
 import type { CreateResult } from '@/types'
 
-defineProps<{ result: CreateResult | null; open: boolean }>()
+defineProps<{
+  result: CreateResult | null
+  open: boolean
+  /** 账号名,拿不到时退回显示 account_id */
+  accountName?: string
+}>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 async function copy(text: string) {
@@ -39,6 +44,11 @@ async function copy(text: string) {
           :title="`复制 ${result.email}`"
           @click="copy(result.email)"
         >{{ result.email }}</button>
+        <div class="owner">
+          <span class="k">归属账号</span>
+          <span class="v">{{ accountName || result.account_id }}</span>
+          <span v-if="accountName" class="v mono id">{{ result.account_id }}</span>
+        </div>
         <div class="foot">
           <span class="tag">{{ result.label || '无标签' }}</span>
           <button class="copy-btn" type="button" @click="copy(result.email)">复制地址</button>
@@ -95,7 +105,8 @@ async function copy(text: string) {
 .alias-id { animation: rise 300ms var(--ease-out) both; }
 .label    { animation: rise 300ms var(--ease-out) 90ms both; }
 .email    { animation: rise 300ms var(--ease-out) 180ms both; }
-.foot     { animation: rise 300ms var(--ease-out) 270ms both; }
+.owner    { animation: rise 300ms var(--ease-out) 240ms both; }
+.foot     { animation: rise 300ms var(--ease-out) 300ms both; }
 
 @keyframes rise {
   from { opacity: 0; translate: 0 8px; }
@@ -123,8 +134,15 @@ async function copy(text: string) {
   word-break: break-all;
   line-height: 1.15;
 }
+.owner {
+  margin-top: 16px;
+  display: flex; align-items: baseline; gap: 10px;
+  .k { color: var(--dim); font-size: 11px; letter-spacing: 0.06em; flex: none; }
+  .v { font-size: 12px; color: var(--ink); }
+  .id { color: var(--dim); font-size: 11px; margin-left: auto; }
+}
 .foot {
-  margin-top: 20px;
+  margin-top: 14px;
   display: flex; align-items: center; justify-content: space-between;
   border-top: 1px dashed var(--rule);
   padding-top: 14px;

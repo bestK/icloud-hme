@@ -1,6 +1,7 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios'
 import type {
-  Account, Alias, CreateResult, LoginDone, LoginResponse, MailMessage, PoolView, Role, TokenView,
+  Account, Alias, CreateResult, FillerStatus, LoginDone, LoginResponse, MailMessage, PoolView,
+  Role, TokenView,
 } from '@/types'
 
 const TOKEN_KEY = 'hme_token'
@@ -137,6 +138,8 @@ export const api = {
 
 
   listPool: async () => unwrap<PoolView[]>((await http.get('/pool')).data),
+
+  fillerStatus: async () => unwrap<FillerStatus>((await http.get('/pool/filler')).data),
 
   listTokens: async () => unwrap<TokenView[]>((await http.get('/tokens')).data),
 

@@ -38,7 +38,7 @@ watch(
     </svg>
 
     <div class="acct-tag">ACCT · {{ view.account_id.replace('acc_', '').toUpperCase() }}</div>
-    <div class="label">地址池深度</div>
+    <div class="label">这个账号的地址池深度 · 已建好待分配</div>
     <div class="number">
       <span class="digits">{{ String(displayed).padStart(2, '0') }}</span>
       <span class="of">/ {{ view.target }} 目标</span>
@@ -46,12 +46,19 @@ watch(
 
     <div class="side">
       <div class="side-row">
-        <span class="k">本小时已用</span>
-        <span class="v mono">{{ view.hour_used }} / {{ view.hourly_max }}</span>
+        <span class="k">账号</span>
+        <span class="v">{{ view.account_name || view.account_id }}</span>
       </div>
       <div class="side-row">
-        <span class="k">账号</span>
+        <span class="k">账号 ID</span>
         <span class="v mono">{{ view.account_id }}</span>
+      </div>
+      <div class="side-row">
+        <span class="k">本小时已建</span>
+        <span class="v mono">{{ view.hour_used }} / {{ view.hourly_max }}</span>
+      </div>
+      <div v-if="view.account_status && view.account_status !== 'active'" class="skip">
+        账号状态 {{ view.account_status }} · 定时补池会跳过它
       </div>
     </div>
   </div>
@@ -118,6 +125,11 @@ watch(
   /* 同上:键名改中文后去掉 uppercase 与宽字距 */
   .k { color: var(--dim); font-size: 12px; letter-spacing: 0.04em; }
   .v { font-size: 12px; color: var(--ink); }
+}
+.skip {
+  margin-top: 4px; padding-top: 8px;
+  border-top: 1px dashed var(--rule);
+  color: var(--accent); font-size: 11px; line-height: 1.5;
 }
 
 @media (max-width: 720px) {
