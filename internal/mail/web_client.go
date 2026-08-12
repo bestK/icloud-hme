@@ -222,19 +222,34 @@ func (c *WebClient) search(payload string) ([]Message, error) {
 	return messages, nil
 }
 
-// ListInbox 列出收件箱邮件。
+// webJunkName 是 mailws2 里垃圾箱的文件夹名。
+const webJunkName = "Junk"
+
+// ListInbox 列出收件箱和垃圾箱的邮件,按时间倒序合并。
 func (c *WebClient) ListInbox(limit int) ([]Message, error) {
-	payload := fmt.Sprintf(`{"responseType":"THREAD_DIGEST","includeFolderStatus":true,"maxResults":%d,"sessionHeaders":{"folder":"INBOX","modseq":null,"threadmodseq":null,"condstore":1,"qresync":1,"threadmode":1}}`, limit)
-	return c.search(payload)
+	msgs, err := c.listFolder(inboxName, limit)
+	if err != nil {
+		return nil, err
+	}
+	// 垃圾箱读失败不该连收件箱一起丢掉 —— 验证码常在这里,值得一试,
+	// 但它不是这个接口的成败所在。
+	if junk, err := c.listFolder(webJunkName, limit); err == nil {
+		msgs = append(msgs, junk...)
+	}
+	return capNewest(msgs, limit), nil
 }
 
-// SearchMails 搜索邮件。query 为空时等价于 ListInbox。
-func (c *WebClient) SearchMails(query string, limit int) ([]Message, error) {
-	if query == "" {
-		return c.ListInbox(limit)
+// listFolder 列出指定文件夹的邮件。
+func (c *WebClient) listFolder(folder string, limit int) ([]Message, error) {
+	payload := fmt.Sprintf(`{"responseType":"THREAD_DIGEST","includeFolderStatus":true,"maxResults":%d,"sessionHeaders":{"folder":%q,"modseq":null,"threadmodseq":null,"condstore":1,"qresync":1,"threadmode":1}}`, limit, folder)
+	msgs, err := c.search(payload)
+	if err != nil {
+		return nil, err
 	}
-	payload := fmt.Sprintf(`{"responseType":"THREAD_DIGEST","includeFolderStatus":false,"maxResults":%d,"query":%q,"sessionHeaders":{"folder":"INBOX","condstore":1,"qresync":1,"threadmode":1}}`, limit, query)
-	return c.search(payload)
+	for i := range msgs {
+		msgs[i].Folder = folder
+	}
+	return msgs, nil
 }
 
 // FindByAlias 查找发给指定别名的邮件——在本地过滤(Web API 不支持收件人搜索)。

@@ -11,6 +11,7 @@ import (
 	"mime/quotedprintable"
 	"net/mail"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,7 +23,12 @@ import (
 const (
 	IMAPServer = "imap.mail.me.com"
 	IMAPPort   = 993
+
+	inboxName = "INBOX"
 )
+
+// junkNames 是服务器不给 SPECIAL-USE 属性时,垃圾箱名字的兜底猜测。
+var junkNames = []string{"Junk", "Spam", "Bulk Mail", "垃圾邮件"}
 
 // Message 是一封邮件的摘要信息。
 type Message struct {
@@ -32,6 +38,9 @@ type Message struct {
 	Subject string `json:"subject"`
 	Date    string `json:"date"`
 	Preview string `json:"preview"`
+	// Folder 是这封邮件所在的邮箱名(INBOX / Junk)。
+	// 验证码常被判进垃圾箱,不标出来会让人以为收件箱里凭空多了封信。
+	Folder string `json:"folder,omitempty"`
 }
 
 // FullMessage 是一封邮件的完整内容(含正文)。
@@ -46,6 +55,9 @@ type Client struct {
 	appleID     string
 	appPassword string
 	cli         *client.Client
+
+	junk        string // 垃圾箱邮箱名,空表示这个账号没有
+	junkChecked bool   // 查过一次就不再重复 LIST
 }
 
 // NewClient 创建 IMAP 客户端。需在调用其它方法前先 Connect。
@@ -87,7 +99,7 @@ func (c *Client) InboxCount() (int, error) {
 	return int(mbox.Messages), nil
 }
 
-// ListInbox 拉取收件箱最近 limit 封邮件摘要。
+// ListInbox 拉取收件箱和垃圾箱最近 limit 封邮件摘要。
 //
 // days 用于过滤只看近 N 天的邮件(0 表示不限制)。
 // 返回按时间倒序排列。
@@ -99,7 +111,73 @@ func (c *Client) ListInbox(limit int, days int) ([]Message, error) {
 		limit = 50
 	}
 
-	mbox, err := c.cli.Select("INBOX", true)
+	var out []Message
+	for _, box := range c.mailboxes() {
+		msgs, err := c.listMailbox(box, limit, days)
+		if err != nil {
+			// 垃圾箱读不到不该让整个请求失败,收件箱的信还是要给出去
+			if box == inboxName {
+				return nil, err
+			}
+			continue
+		}
+		out = append(out, msgs...)
+	}
+	return capNewest(out, limit), nil
+}
+
+// mailboxes 返回要读的邮箱:收件箱 + 垃圾箱(如果有)。
+//
+// 别名收到的注册验证码经常被 Apple 直接判成垃圾邮件,只读 INBOX 的话
+// 界面上就是"什么都没收到"。
+func (c *Client) mailboxes() []string {
+	boxes := []string{inboxName}
+	if junk := c.findJunk(); junk != "" {
+		boxes = append(boxes, junk)
+	}
+	return boxes
+}
+
+// findJunk 找出垃圾箱的邮箱名。
+//
+// 优先认 SPECIAL-USE 的 \Junk 属性,服务器不给属性时再按常见名字兜底 ——
+// 名字是本地化的,不能写死。
+func (c *Client) findJunk() string {
+	if c.junkChecked {
+		return c.junk
+	}
+	c.junkChecked = true
+
+	infos := make(chan *imap.MailboxInfo, 32)
+	done := make(chan error, 1)
+	go func() { done <- c.cli.List("", "*", infos) }()
+
+	byName := make(map[string]string)
+	for info := range infos {
+		byName[strings.ToLower(info.Name)] = info.Name
+		for _, attr := range info.Attributes {
+			if strings.EqualFold(attr, imap.JunkAttr) {
+				c.junk = info.Name
+			}
+		}
+	}
+	if err := <-done; err != nil {
+		return c.junk
+	}
+	if c.junk == "" {
+		for _, guess := range junkNames {
+			if real, ok := byName[strings.ToLower(guess)]; ok {
+				c.junk = real
+				break
+			}
+		}
+	}
+	return c.junk
+}
+
+// listMailbox 拉取单个邮箱最近 limit 封邮件。
+func (c *Client) listMailbox(box string, limit int, days int) ([]Message, error) {
+	mbox, err := c.cli.Select(box, true)
 	if err != nil {
 		return nil, err
 	}
@@ -135,13 +213,9 @@ func (c *Client) ListInbox(limit int, days int) ([]Message, error) {
 	var out []Message
 	for msg := range messages {
 		m := toMessageWithBody(msg)
-		// days 过滤
-		if days > 0 {
-			if t, err := time.Parse(time.RFC1123Z, m.Date); err == nil {
-				if time.Since(t) > time.Duration(days)*24*time.Hour {
-					continue
-				}
-			}
+		m.Folder = box
+		if days > 0 && olderThan(m.Date, days) {
+			continue
 		}
 		out = append(out, m)
 	}
@@ -151,9 +225,9 @@ func (c *Client) ListInbox(limit int, days int) ([]Message, error) {
 	return out, nil
 }
 
-// FindByRecipient 查找发给指定隐私邮箱别名的邮件。
+// FindByRecipient 查找发给指定隐私邮箱别名的邮件,收件箱和垃圾箱都找。
 //
-// 先尝试 IMAP TO 搜索;失败则拉取收件箱后本地过滤。
+// 每个邮箱先试服务端 TO 搜索,搜不到再拉回来本地过滤。
 func (c *Client) FindByRecipient(recipient string, limit int, days int) ([]Message, error) {
 	if c.cli == nil {
 		return nil, fmt.Errorf("未连接")
@@ -162,25 +236,39 @@ func (c *Client) FindByRecipient(recipient string, limit int, days int) ([]Messa
 		limit = 20
 	}
 
-	// 先尝试服务端 TO 搜索
-	mbox, err := c.cli.Select("INBOX", true)
-	if err != nil {
+	var out []Message
+	for _, box := range c.mailboxes() {
+		msgs, err := c.searchMailbox(box, recipient, limit, days)
+		if err != nil {
+			if box == inboxName {
+				return nil, err
+			}
+			continue
+		}
+		out = append(out, msgs...)
+	}
+	return capNewest(out, limit), nil
+}
+
+// searchMailbox 在单个邮箱里找发给 recipient 的邮件。
+func (c *Client) searchMailbox(box, recipient string, limit int, days int) ([]Message, error) {
+	if _, err := c.cli.Select(box, true); err != nil {
 		return nil, err
 	}
+
 	criteria := imap.NewSearchCriteria()
 	criteria.Header.Add("To", recipient)
 	if days > 0 {
-		since := time.Now().AddDate(0, 0, -days)
-		criteria.Since = since
+		criteria.Since = time.Now().AddDate(0, 0, -days)
 	}
 	uids, err := c.cli.UidSearch(criteria)
 	if err == nil && len(uids) > 0 {
-		return c.fetchByUIDs(uids, limit)
+		return c.fetchByUIDs(box, uids, limit)
 	}
-	_ = mbox
 
-	// fallback: 拉取收件箱后本地过滤
-	all, err := c.ListInbox(limit*3, days)
+	// fallback: 拉回来本地按收件人过滤。别名会出现在 To 或 Cc 里,
+	// 也可能只在 Delivered-To 上 —— 服务端搜不到时宁可多扫几封。
+	all, err := c.listMailbox(box, limit*3, days)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +285,7 @@ func (c *Client) FindByRecipient(recipient string, limit int, days int) ([]Messa
 	return out, nil
 }
 
-func (c *Client) fetchByUIDs(uids []uint32, limit int) ([]Message, error) {
+func (c *Client) fetchByUIDs(box string, uids []uint32, limit int) ([]Message, error) {
 	if len(uids) == 0 {
 		return []Message{}, nil
 	}
@@ -221,7 +309,9 @@ func (c *Client) fetchByUIDs(uids []uint32, limit int) ([]Message, error) {
 
 	var out []Message
 	for msg := range messages {
-		out = append(out, toMessageWithBody(msg))
+		m := toMessageWithBody(msg)
+		m.Folder = box
+		out = append(out, m)
 	}
 	if err := <-done; err != nil {
 		return nil, err
@@ -266,6 +356,48 @@ func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
 		}
 	}
 	return full, nil
+}
+
+// ---- 时间与排序 ----
+
+// parseDate 解析 Message.Date。IMAP 和 Web 两条路都按 RFC3339 输出。
+func parseDate(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+// olderThan 判断邮件是否早于 days 天。解析不出日期就当它没超期,
+// 宁可多显示一封,也不要因为解析失败静默吞掉邮件。
+func olderThan(date string, days int) bool {
+	t, ok := parseDate(date)
+	if !ok {
+		return false
+	}
+	return time.Since(t) > time.Duration(days)*24*time.Hour
+}
+
+// capNewest 把多个邮箱合并来的邮件按时间倒序排好,再截到 limit 封。
+func capNewest(msgs []Message, limit int) []Message {
+	if msgs == nil {
+		return []Message{}
+	}
+	sort.SliceStable(msgs, func(i, j int) bool {
+		ti, oki := parseDate(msgs[i].Date)
+		tj, okj := parseDate(msgs[j].Date)
+		if oki != okj {
+			return oki // 有日期的排前面
+		}
+		return ti.After(tj)
+	})
+	if limit > 0 && len(msgs) > limit {
+		msgs = msgs[:limit]
+	}
+	return msgs
 }
 
 // ---- 解析工具 ----
