@@ -131,11 +131,7 @@ func failWithUpstream(c *gin.Context, code, upstream int, msg string) {
 // prefix 用于给用户提供操作上下文,比如"创建邮箱失败"。
 func failUpstream(c *gin.Context, prefix string, err error) {
 	msg := err.Error()
-	upstream := 0
-	var ue *hme.UpstreamError
-	if errors.As(err, &ue) {
-		upstream = ue.Status
-	}
+	upstream := upstreamStatusOf(err)
 
 	switch {
 	case hme.SessionExpired(err) || (upstream == 0 && isSessionError(msg)):
@@ -147,6 +143,30 @@ func failUpstream(c *gin.Context, prefix string, err error) {
 	default:
 		failWithUpstream(c, http.StatusBadGateway, upstream, prefix+": "+msg)
 	}
+}
+
+// upstreamStatusOf 从错误链里取出上游 HTTP 状态码,取不到返回 0。
+// iCloud 数据接口的 UpstreamError 和 Apple 认证接口的 AuthError 都实现了它。
+func upstreamStatusOf(err error) int {
+	var coded interface{ UpstreamStatus() int }
+	if errors.As(err, &coded) {
+		return coded.UpstreamStatus()
+	}
+	return 0
+}
+
+// failAuth 处理密码登录过程中的失败。
+//
+// 登录失败和会话失效是两件事。后者的处理办法是「重新登录」,而这里用户正在
+// 登录,再让他去「重新登录换 Cookie」就是一句废话 —— 所以认证错误必须先拦下来,
+// 不能落进 failUpstream 那套按状态码猜的分档里。
+func failAuth(c *gin.Context, prefix string, err error) {
+	var ae *hme.AuthError
+	if errors.As(err, &ae) {
+		failWithUpstream(c, http.StatusUnauthorized, ae.Status, prefix+": "+ae.Error())
+		return
+	}
+	failUpstream(c, prefix, err)
 }
 
 // ====================================================================
@@ -484,7 +504,7 @@ func (s *Server) loginAccount(c *gin.Context) {
 
 	res, err := s.mgr.LoginStart(id, req.Password)
 	if err != nil {
-		failUpstream(c, "登录失败", err)
+		failAuth(c, "登录失败", err)
 		return
 	}
 	if res.Pending != nil {
@@ -521,7 +541,7 @@ func (s *Server) verifyLogin(c *gin.Context) {
 
 	res, err := s.mgr.LoginFinish(id, pending, strings.TrimSpace(req.Code))
 	if err != nil {
-		failUpstream(c, "验证码校验失败", err)
+		failAuth(c, "验证失败", err)
 		return
 	}
 	ok(c, loginDone(id, res))

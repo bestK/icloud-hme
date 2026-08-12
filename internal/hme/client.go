@@ -55,6 +55,9 @@ func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body)
 }
 
+// UpstreamStatus 让调用方不必区分错误类型就能取到上游状态码。
+func (e *UpstreamError) UpstreamStatus() int { return e.Status }
+
 // SessionExpired 判断错误是否属于「会话已失效,只有重新登录才有用」这一类。
 // 命中后继续重试纯属白等。
 func SessionExpired(err error) bool {

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 	"golang.org/x/crypto/pbkdf2"
 
 	http "github.com/bogdanfinn/fhttp"
@@ -38,15 +40,55 @@ const (
 
 // authState 保存认证过程中的状态
 type authState struct {
-	username   string
-	frameId    string
-	clientId   string
+	username string
+	frameId  string
+	clientId string
+	// srpC 是 signin/init 返回的 SRP 挑战令牌(形如 "i-569-...")。
+	// signin/complete 必须原样带回,Apple 靠它找回那次 SRP 会话。
+	// 别和 clientId(OAuth 客户端 ID)搞混 —— 传错了 M1 就无法校验,
+	// Apple 一律返 401,看起来跟密码错误一模一样。
+	srpC       string
 	authAttr   string
 	sessionID  string
 	scnt       string
 	authToken  string
 	trustToken string
 	dsid       string
+}
+
+// AuthError 是 Apple 认证服务(idmsa.apple.com)拒绝登录时返回的错误。
+//
+// 和 UpstreamError 不是一回事:UpstreamError 说的是「已经拿到的会话用不了了」,
+// 处理办法是重新登录;AuthError 说的是「这次登录本身没通过」。两者混在一起,
+// 就会对着正在登录的用户提示「请更新 Cookie」这种毫无意义的话。
+type AuthError struct {
+	Status int    // idmsa 返回的 HTTP 状态码
+	Reason string // 人类可读的原因
+	Body   string // Apple 给的具体错误(取 serviceErrors,取不到就是响应体片段)
+}
+
+func (e *AuthError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("%s (HTTP %d)", e.Reason, e.Status)
+	}
+	return fmt.Sprintf("%s (HTTP %d) — %s", e.Reason, e.Status, e.Body)
+}
+
+// UpstreamStatus 让调用方不必区分错误类型就能取到上游状态码。
+func (e *AuthError) UpstreamStatus() int { return e.Status }
+
+// authFail 把 idmsa 的非预期响应包成 AuthError。调用方负责给出 reason。
+func authFail(resp *http.Response, reason string) *AuthError {
+	raw, _ := io.ReadAll(resp.Body)
+	// Apple 把具体原因放在 serviceErrors 里,比响应体片段准
+	detail := gjson.GetBytes(raw, "serviceErrors.0.message").String()
+	if detail == "" {
+		detail = strings.TrimSpace(string(raw))
+		if len(detail) > 200 {
+			detail = detail[:200]
+		}
+	}
+	return &AuthError{Status: resp.StatusCode, Reason: reason, Body: detail}
 }
 
 // PendingLogin 是一次卡在双重认证上的登录:密码已经通过 SRP 校验,
@@ -106,13 +148,13 @@ func (c *Client) BeginLogin(username, password string) (*PendingLogin, error) {
 	}
 
 	// 6. 生成密码密钥
-	passHash := sha256.Sum256([]byte(password))
-	passKey := pbkdf2.Key(passHash[:], saltDec, authInitResp.Iteration, 32, sha256.New)
+	passKey := srpPasswordKey(password, authInitResp.Protocol, saltDec, authInitResp.Iteration)
 
 	// 7. 处理挑战
 	srpClient.ProcessClientChanllenge([]byte(username), passKey, saltDec, bDec)
 
 	// 8. 提交 SRP 响应 (可能触发 2FA)
+	state.srpC = authInitResp.C
 	needs2FA, err := c.authComplete(state, base64.StdEncoding.EncodeToString(srpClient.M1), base64.StdEncoding.EncodeToString(srpClient.M2))
 	if err != nil {
 		return nil, fmt.Errorf("auth complete: %w", err)
@@ -146,6 +188,20 @@ func (c *Client) finishLogin(state *authState) error {
 	return nil
 }
 
+// srpPasswordKey 按 Apple 选定的协议派生 SRP 用的密码密钥。
+//
+// s2k 直接用 SHA-256 摘要,s2k_fo 用摘要的十六进制字符串。协议是 signin/init
+// 响应里的 protocol 字段说的,不能假定 —— 选错这一步 M1 对不上,Apple 在
+// signin/complete 上返 401,和密码错误的表现完全一样。
+func srpPasswordKey(password, protocol string, salt []byte, iterations int) []byte {
+	digest := sha256.Sum256([]byte(password))
+	material := digest[:]
+	if protocol == "s2k_fo" {
+		material = []byte(hex.EncodeToString(digest[:]))
+	}
+	return pbkdf2.Key(material, salt, iterations, 32, sha256.New)
+}
+
 // --- 认证流程的各步骤 ---
 
 // authStart 初始化 frameId 和 clientId
@@ -168,7 +224,7 @@ func (c *Client) authStart(state *authState) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return authFail(resp, "认证会话初始化失败")
 	}
 
 	state.authAttr = resp.Header.Get("X-Apple-Auth-Attributes")
@@ -193,7 +249,7 @@ func (c *Client) authFederate(state *authState) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return authFail(resp, "提交账号名被拒绝")
 	}
 	return nil
 }
@@ -234,9 +290,18 @@ func (c *Client) authInit(state *authState, a string) (*authInitResp, error) {
 	}
 	defer resp.Body.Close()
 
+	// 不检查状态码就 decode,拿到的是一个字段全空的结构体,错误会推迟到
+	// signin/complete 上变成一个看不懂的 401
+	if resp.StatusCode != 200 {
+		return nil, authFail(resp, "SRP 初始化被拒绝(账号名可能不存在)")
+	}
+
 	var result authInitResp
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	if result.B == "" || result.Salt == "" || result.C == "" {
+		return nil, fmt.Errorf("SRP 初始化响应缺字段 (b/salt/c),协议可能变了")
 	}
 	return &result, nil
 }
@@ -249,8 +314,9 @@ func (c *Client) authComplete(state *authState, m1, m2 string) (needs2FA bool, e
 		"rememberMe":  true,
 		"trustTokens": []string{},
 		"m1":          m1,
-		"c":           state.clientId,
-		"m2":          m2,
+		// 必须是 signin/init 返回的挑战令牌,不是 OAuth clientId
+		"c":  state.srpC,
+		"m2": m2,
 	}
 
 	data, err := json.Marshal(reqBody)
@@ -283,12 +349,12 @@ func (c *Client) authComplete(state *authState, m1, m2 string) (needs2FA bool, e
 			return false, fmt.Errorf("需要双重认证,但响应里没有 X-Apple-ID-Session-Id")
 		}
 		return true, nil
-	case 403:
-		return false, fmt.Errorf("用户名或密码错误")
+	case 401, 403:
+		return false, authFail(resp, "Apple 拒绝了密码校验(Apple ID 或密码不正确,或账号被锁定)")
 	case 412:
-		return false, fmt.Errorf("需要先在 appleid.apple.com 同意隐私条款")
+		return false, authFail(resp, "需要先到 appleid.apple.com 同意隐私条款")
 	default:
-		return false, fmt.Errorf("auth complete 失败: HTTP %d", resp.StatusCode)
+		return false, authFail(resp, "密码校验失败")
 	}
 }
 
@@ -314,17 +380,12 @@ func (c *Client) submitSecurityCode(state *authState, code string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 204 {
-		raw, _ := io.ReadAll(resp.Body)
-		snippet := strings.TrimSpace(string(raw))
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
-		}
-		// Apple 对错码返 400。这一步失败后 sessionID 就废了,只能重新发起登录
-		// 让它重发一个码。
+		// Apple 对错码返 400。这一步失败后 sessionID 就废了,只能重新发起
+		// 登录让它重发一个码。
 		if resp.StatusCode == 400 {
-			return fmt.Errorf("验证码错误或已过期,请重新发起登录 — %s", snippet)
+			return authFail(resp, "验证码错误或已过期,请重新输密码发起登录")
 		}
-		return fmt.Errorf("2FA 验证失败: HTTP %d — %s", resp.StatusCode, snippet)
+		return authFail(resp, "验证码校验失败")
 	}
 
 	if newScnt := resp.Header.Get("scnt"); newScnt != "" {
@@ -349,7 +410,7 @@ func (c *Client) getTrust(state *authState) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 204 {
-		return fmt.Errorf("trust 失败: HTTP %d", resp.StatusCode)
+		return authFail(resp, "信任设备失败")
 	}
 
 	state.authToken = resp.Header.Get("X-Apple-Session-Token")
@@ -378,7 +439,7 @@ func (c *Client) authenticateWeb(state *authState) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("auth web 失败: HTTP %d", resp.StatusCode)
+		return authFail(resp, "换取 iCloud Web 会话失败")
 	}
 
 	var result struct {
