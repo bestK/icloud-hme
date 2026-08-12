@@ -162,6 +162,11 @@ function stopCountdown() {
   loginLeft.value = 0
 }
 
+// 登录实际用的账号名:和后端 LoginStart 的取值顺序保持一致
+const loginEmail = computed(
+  () => loginAcc.value?.icloud_email || loginAcc.value?.real_email || '',
+)
+
 const loginLeftText = computed(() => {
   const s = Math.max(0, loginLeft.value)
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
@@ -407,6 +412,13 @@ onUnmounted(stopCountdown)
       </template>
 
       <template v-if="loginStep === 'password'">
+        <!-- 密码是给哪个 Apple ID 的,必须让人看见:一个面板下挂多个账号时,
+             对着错误的账号输密码只会换来一句"Apple ID 或密码不正确" -->
+        <div class="acct-line" :class="{ missing: !loginEmail }">
+          <span class="k">Apple ID</span>
+          <span v-if="loginEmail" class="mono v">{{ loginEmail }}</span>
+          <span v-else class="v warn">未设置 —— 先粘一次 Cookie 或设置 App Password 把邮箱补上</span>
+        </div>
         <el-alert
           type="warning" :closable="false"
           title="用 Apple ID 的常规密码,不是 App Password"
@@ -419,6 +431,7 @@ onUnmounted(stopCountdown)
               v-model="loginForm.password"
               type="password"
               show-password
+              :disabled="!loginEmail"
               @keyup.enter="submitPassword"
             />
           </el-form-item>
@@ -426,9 +439,13 @@ onUnmounted(stopCountdown)
       </template>
 
       <template v-else>
+        <div class="acct-line">
+          <span class="k">Apple ID</span>
+          <span class="mono v">{{ loginAppleId || loginEmail }}</span>
+        </div>
         <el-alert
           type="info" :closable="false"
-          :title="`验证码已发到 ${loginAppleId || '受信任设备'}`"
+          title="验证码已发到该账号的受信任设备"
           description="填这台设备上弹出的 6 位数字。这一步复用刚才那次登录会话,不要回去重新提交密码 —— 那会让 Apple 重发一个新码,手上这个当场作废。"
           style="margin-bottom: 12px"
         />
@@ -454,7 +471,8 @@ onUnmounted(stopCountdown)
         <el-button plain @click="loginOpen = false">取消</el-button>
         <el-button
           v-if="loginStep === 'password'"
-          type="primary" :loading="loginLoading" @click="submitPassword"
+          type="primary" :loading="loginLoading" :disabled="!loginEmail"
+          @click="submitPassword"
         >下一步</el-button>
         <el-button v-else type="primary" :loading="loginLoading" @click="submitCode">
           完成登录
@@ -542,6 +560,23 @@ onUnmounted(stopCountdown)
 .small { font-size: 11px; letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
 .dim { color: var(--dim); }
 .warn { color: var(--accent); }
+
+/* 弹窗里的"这条操作作用在谁身上" */
+.acct-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--rule);
+  .k {
+    flex: none;
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--dim);
+  }
+  .v { font-size: 13px; word-break: break-all; }
+  &.missing { border-color: var(--accent); }
+}
 
 .eyebrow { font-size: 10px; }
 .dialog-title {
