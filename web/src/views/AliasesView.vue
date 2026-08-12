@@ -124,7 +124,10 @@ onMounted(async () => {
           <div class="eyebrow">别名 · ALIASES</div>
           <h1>别名地址</h1>
         </div>
-        <el-button type="primary" size="large" @click="dialogOpen = true">+ 新建别名</el-button>
+        <div class="row-acts">
+          <el-button plain size="large" :loading="loading" @click="loadAliases">刷新</el-button>
+          <el-button type="primary" size="large" @click="dialogOpen = true">+ 新建别名</el-button>
+        </div>
       </div>
 
       <div class="filter">
@@ -208,6 +211,7 @@ onMounted(async () => {
 .page { max-width: 1080px; }
 
 .masthead .row { display: flex; align-items: flex-end; justify-content: space-between; }
+.row-acts { display: flex; gap: 10px; }
 .masthead h1 {
   font-family: var(--f-display); font-weight: 700;
   font-size: 40px; letter-spacing: -0.02em; margin: 6px 0;

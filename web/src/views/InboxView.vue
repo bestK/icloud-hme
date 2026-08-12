@@ -29,12 +29,24 @@ async function load() {
   }
 }
 
+// 点查询/回车:先把参数同步进 URL(方便刷新和分享),再确保真的去读一次。
+// 参数没变时 router.replace 是一次重复导航,下面的 watch 不会触发 ——
+// 只把它当触发器,按钮点下去就毫无反应。
 function apply() {
+  if (!accountId.value || !alias.value) {
+    ElMessage.warning('填上 account_id 和别名地址')
+    return
+  }
+  const unchanged =
+    route.query.account_id === accountId.value && route.query.alias === alias.value
   router.replace({ query: { account_id: accountId.value, alias: alias.value } })
+  if (unchanged) load()
 }
-watch(() => route.query, () => {
-  accountId.value = (route.query.account_id as string) || ''
-  alias.value = (route.query.alias as string) || ''
+
+// URL 变化:浏览器前进后退,或从别名页带着参数跳进来
+watch(() => [route.query.account_id, route.query.alias], ([acc, al]) => {
+  accountId.value = (acc as string) || ''
+  alias.value = (al as string) || ''
   load()
 })
 onMounted(load)
@@ -46,9 +58,9 @@ onMounted(load)
       <div class="eyebrow">收件箱 · INBOX</div>
       <h1>别名收件箱</h1>
       <div class="filter">
-        <el-input v-model="accountId" placeholder="account_id" style="width: 240px" />
+        <el-input v-model="accountId" placeholder="account_id" style="width: 240px" @keyup.enter="apply" />
         <el-input v-model="alias" placeholder="alias@icloud.com" style="width: 320px" @keyup.enter="apply" />
-        <el-button type="primary" @click="apply">查询</el-button>
+        <el-button type="primary" :loading="loading" @click="apply">查询</el-button>
         <span v-if="method" class="method mono">via {{ method }}</span>
       </div>
     </div>

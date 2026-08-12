@@ -81,7 +81,10 @@ onMounted(load)
       <div class="eyebrow">令牌 · TOKENS</div>
       <div class="row">
         <h1>API token</h1>
-        <el-button type="primary" @click="dialogOpen = true">+ 新建 token</el-button>
+        <div class="row-acts">
+          <el-button plain :loading="loading" @click="load">刷新</el-button>
+          <el-button type="primary" @click="dialogOpen = true">+ 新建 token</el-button>
+        </div>
       </div>
       <div class="sub">secret 只在创建时显示一次,请交给使用方后自行保管。</div>
     </div>
@@ -176,6 +179,7 @@ onMounted(load)
   font-size: 40px; letter-spacing: -0.02em; margin: 6px 0;
 }
 .masthead .row { display: flex; align-items: center; justify-content: space-between; }
+.row-acts { display: flex; gap: 10px; }
 .masthead .sub { color: var(--dim); font-size: 13px; }
 
 .meta { color: var(--dim); font-size: 11px; }

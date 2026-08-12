@@ -282,7 +282,10 @@ onUnmounted(stopCountdown)
           <div class="eyebrow">账号 · ACCOUNTS</div>
           <h1>iCloud 账号</h1>
         </div>
-        <el-button type="primary" @click="addOpen = true">+ 添加账号</el-button>
+        <div class="row-acts">
+          <el-button plain :loading="loading" @click="load">刷新</el-button>
+          <el-button type="primary" @click="addOpen = true">+ 添加账号</el-button>
+        </div>
       </div>
       <div class="sub">Cookie 大约 24 小时轮换 · 失效后重新粘贴或用密码登录</div>
     </div>
@@ -513,6 +516,7 @@ onUnmounted(stopCountdown)
 <style lang="scss" scoped>
 .page { max-width: 1100px; }
 .masthead .row { display: flex; align-items: flex-end; justify-content: space-between; }
+.row-acts { display: flex; gap: 10px; }
 .masthead h1 {
   font-family: var(--f-display); font-weight: 700;
   font-size: 40px; letter-spacing: -0.02em; margin: 6px 0;

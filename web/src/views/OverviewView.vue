@@ -29,8 +29,13 @@ onMounted(load)
 <template>
   <section class="page">
     <div class="masthead">
-      <div class="eyebrow">总览 · OVERVIEW</div>
-      <h1>运行状态</h1>
+      <div class="row">
+        <div>
+          <div class="eyebrow">总览 · OVERVIEW</div>
+          <h1>运行状态</h1>
+        </div>
+        <el-button plain :loading="loading" @click="load">刷新</el-button>
+      </div>
       <div class="sub">
         {{ accounts.length }} 个 iCloud 账号 · {{ tokens.length }} 个 token ·
         地址池中 {{ pools.reduce((s, p) => s + p.depth, 0) }} 个待用别名
@@ -87,6 +92,7 @@ onMounted(load)
 .page { max-width: 1080px; }
 
 .masthead { margin-bottom: 24px; }
+.masthead .row { display: flex; align-items: flex-end; justify-content: space-between; }
 .masthead h1 {
   font-family: var(--f-display); font-weight: 700;
   font-size: 44px; letter-spacing: -0.02em; margin: 6px 0 6px;
