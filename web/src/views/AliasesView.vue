@@ -4,6 +4,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import type { Account, Alias, CreateResult } from '@/types'
 import AliasCreated from '@/components/AliasCreated.vue'
+import ListPager from '@/components/ListPager.vue'
+import { usePagination } from '@/composables/usePagination'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
@@ -14,6 +16,9 @@ const accounts = ref<Account[]>([])
 const accountId = ref<string>('')
 const aliases = ref<Alias[]>([])
 const loading = ref(false)
+
+// 一个账号最多能有几百个别名
+const { page, pageSize, total, paged: pagedAliases, reset: resetPage } = usePagination(aliases)
 
 const dialogOpen = ref(false)
 const newLabel = ref('')
@@ -114,7 +119,10 @@ function openInbox(a: Alias) {
   router.push({ path: '/inbox', query: { account_id: accountId.value, alias: a.email } })
 }
 
-watch(accountId, loadAliases)
+watch(accountId, () => {
+  resetPage()
+  loadAliases()
+})
 onMounted(async () => {
   await loadAccounts()
   await loadAliases()
@@ -146,11 +154,11 @@ onMounted(async () => {
           <span class="eyebrow">账号</span>
           <el-input v-model="accountId" placeholder="acc_xxxxxxxx" style="width: 240px; margin-left: 12px;" />
         </div>
-        <span class="count-line mono">count · {{ aliases.length }}</span>
+        <span class="count-line mono">count · {{ total }}</span>
       </div>
     </div>
 
-    <el-table :data="aliases" v-loading="loading" :empty-text="emptyHint" stripe>
+    <el-table :data="pagedAliases" v-loading="loading" :empty-text="emptyHint" stripe>
       <el-table-column label="地址" prop="email" min-width="240">
         <template #default="{ row }">
           <button
@@ -190,6 +198,8 @@ onMounted(async () => {
         </template>
       </el-table-column>
     </el-table>
+
+    <ListPager v-model:page="page" v-model:page-size="pageSize" :total="total" />
 
     <!-- 创建对话框 -->
     <el-dialog v-model="dialogOpen" title="新建别名" width="440px">

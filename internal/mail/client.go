@@ -5,11 +5,10 @@
 package mail
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"mime"
-	"mime/quotedprintable"
-	"net/mail"
 	"regexp"
 	"sort"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
 	"github.com/emersion/go-message/charset"
+	gomail "github.com/emersion/go-message/mail"
 )
 
 const (
@@ -25,6 +25,11 @@ const (
 	IMAPPort   = 993
 
 	inboxName = "INBOX"
+
+	// maxHTMLBytes 是单封邮件回传 HTML 的上限。收件箱一次给 20 封,营销邮件
+	// 动辄几百 KB,不设限一个请求就能拖出几兆 JSON。超限的丢掉 HTML 只留纯文本 ——
+	// 截断会把标签切断,渲染出来是半张残页,还不如不给。
+	maxHTMLBytes = 512 << 10
 )
 
 // junkNames 是服务器不给 SPECIAL-USE 属性时,垃圾箱名字的兜底猜测。
@@ -38,6 +43,9 @@ type Message struct {
 	Subject string `json:"subject"`
 	Date    string `json:"date"`
 	Preview string `json:"preview"`
+	// HTML 是邮件的 text/html 正文原文,供前端渲染。纯文本邮件、
+	// 正文过大被丢弃、或走 Web API 那条路时为空。
+	HTML string `json:"html,omitempty"`
 	// Folder 是这封邮件所在的邮箱名(INBOX / Junk)。
 	// 验证码常被判进垃圾箱,不标出来会让人以为收件箱里凭空多了封信。
 	Folder string `json:"folder,omitempty"`
@@ -346,14 +354,11 @@ func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
 		return nil, fmt.Errorf("邮件不存在 (uid=%d)", uid)
 	}
 
-	full := &FullMessage{Message: toMessage(msg)}
-	// 解析正文
-	if r := msg.GetBody(&imap.BodySectionName{}); r != nil {
-		if em, err := mail.ReadMessage(r); err == nil {
-			body, _ := readBody(em)
-			full.Body = body
-			full.ContentType = em.Header.Get("Content-Type")
-		}
+	full := &FullMessage{Message: toMessageWithBody(msg)}
+	if full.HTML != "" {
+		full.Body, full.ContentType = full.HTML, "text/html"
+	} else {
+		full.Body, full.ContentType = full.Preview, "text/plain"
 	}
 	return full, nil
 }
@@ -432,15 +437,25 @@ func toMessage(msg *imap.Message) Message {
 	return m
 }
 
-// toMessageWithBody 在 toMessage 基础上解析正文填充 Preview(供 OTP 提取)。
+// toMessageWithBody 在 toMessage 基础上解析正文,填充 Preview(供 OTP 提取)和 HTML。
 func toMessageWithBody(msg *imap.Message) Message {
 	m := toMessage(msg)
-	if r := msg.GetBody(&imap.BodySectionName{}); r != nil {
-		if em, err := mail.ReadMessage(r); err == nil {
-			if body, err := readBody(em); err == nil {
-				m.Preview = strings.TrimSpace(body)
-			}
-		}
+	r := msg.GetBody(&imap.BodySectionName{})
+	if r == nil {
+		return m
+	}
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return m
+	}
+
+	b := readBody(raw)
+	m.Preview = strings.TrimSpace(b.text)
+	if m.Preview == "" {
+		m.Preview = stripHTML(b.html)
+	}
+	if len(b.html) <= maxHTMLBytes {
+		m.HTML = b.html
 	}
 	return m
 }
@@ -460,28 +475,64 @@ func decodeHeader(s string) string {
 
 var htmlTag = regexp.MustCompile(`<[^>]+>`)
 
-// readBody 读取邮件正文,优先 text/plain,其次从 HTML 提取纯文本。
-func readBody(msg *mail.Message) (string, error) {
-	ct := msg.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "text/html") {
-		raw, _ := io.ReadAll(msg.Body)
-		// quoted-printable 解码
-		if strings.Contains(msg.Header.Get("Content-Transfer-Encoding"), "quoted-printable") {
-			r := quotedprintable.NewReader(strings.NewReader(string(raw)))
-			raw, _ = io.ReadAll(r)
-		}
-		return stripHTML(string(raw)), nil
+// body 是一封邮件的两份正文,视邮件构成可能只有一份。
+type body struct {
+	text string
+	html string
+}
+
+// readBody 解析整封邮件(含头)的正文,纯文本和 HTML 各取第一份。
+//
+// 真实邮件几乎都是 multipart/alternative,只看顶层 Content-Type 会把 MIME
+// 分隔符和 base64 原样当成正文读出来。这里走一遍分段树,顺带做掉
+// Content-Transfer-Encoding 解码和字符集转换。
+func readBody(raw []byte) body {
+	if b, err := readMIME(raw); err == nil && (b.text != "" || b.html != "") {
+		return b
 	}
-	// 默认当 text/plain
-	raw, err := io.ReadAll(msg.Body)
+	// 头都解析不出来时退回整封原文 —— 难看,但验证码还在里面
+	return body{text: strings.TrimSpace(string(raw))}
+}
+
+func readMIME(raw []byte) (body, error) {
+	mr, err := gomail.CreateReader(bytes.NewReader(raw))
 	if err != nil {
-		return "", err
+		return body{}, err
 	}
-	if strings.Contains(msg.Header.Get("Content-Transfer-Encoding"), "quoted-printable") {
-		r := quotedprintable.NewReader(strings.NewReader(string(raw)))
-		raw, _ = io.ReadAll(r)
+	defer mr.Close()
+
+	var out body
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			// io.EOF 是正常读完;某个分段坏掉时也就此打住,
+			// 前面已经读到的正文不该跟着一起丢
+			break
+		}
+		h, ok := p.Header.(*gomail.InlineHeader)
+		if !ok {
+			continue // 附件
+		}
+		ct, _, err := h.ContentType()
+		if err != nil {
+			continue
+		}
+		// 各取第一份:multipart/related 里同一封信可能有多个 text/html 片段
+		if (ct == "text/plain" && out.text != "") || (ct == "text/html" && out.html != "") {
+			continue
+		}
+		data, err := io.ReadAll(p.Body)
+		if err != nil {
+			continue
+		}
+		switch ct {
+		case "text/plain":
+			out.text = string(data)
+		case "text/html":
+			out.html = string(data)
+		}
 	}
-	return string(raw), nil
+	return out, nil
 }
 
 // stripHTML 粗略剥离 HTML 标签,保留可读文本。

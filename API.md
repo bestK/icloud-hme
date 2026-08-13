@@ -141,7 +141,9 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
         "to": "xyz123@icloud.com",
         "subject": "[GitHub] Please verify your email address",
         "date": "2026-07-09T14:32:10+08:00",
-        "preview": "Almost done! To finish setting up your account, we just need to verify.."
+        "preview": "Almost done! To finish setting up your account, we just need to verify..",
+        "html": "<html><body>Almost done! ...</body></html>",
+        "folder": "INBOX"
       }
     ]
   }
@@ -188,9 +190,14 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
 - **Web API (`FindByAlias`):** iCloud Web API 不支持按收件人搜索,拉取 `limit*2` (至少 50) 条后本地对 `Subject`/`From`/`To` 做包含匹配
 
 **返回字段差异 (两条路径):**
-- `id` — IMAP 是 UID 数字串,Web API 是 iCloud GUID
+- `id` — IMAP 是 UID 数字串,Web API 是 iCloud GUID。IMAP 的 UID 只在单个邮箱内唯一,
+  收件箱和垃圾箱合起来看时要连 `folder` 一起做键
 - `date` — IMAP 走 RFC3339,Web API 是原始邮件头 RFC1123 串
-- `preview` — 正文摘要,非完整正文
+- `preview` — 纯文本正文。IMAP 取 `text/plain` 分段,没有就从 HTML 剥出来;
+  Web API 只有上游给的摘要
+- `html` — `text/html` 正文原文,仅 IMAP 有。纯文本邮件、正文超过 512 KB 时为空。
+  内容不可信,渲染前必须隔离 (面板放在沙箱 iframe 里,并用 CSP 掐掉脚本)
+- `folder` — 邮件所在邮箱,`INBOX` 或垃圾箱名
 
 ---
 

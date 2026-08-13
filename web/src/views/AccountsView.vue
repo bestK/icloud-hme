@@ -3,9 +3,13 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import type { Account, LoginDone } from '@/types'
+import ListPager from '@/components/ListPager.vue'
+import { usePagination } from '@/composables/usePagination'
 
 const accounts = ref<Account[]>([])
 const loading = ref(false)
+
+const { page, pageSize, total, paged: pagedAccounts } = usePagination(accounts)
 
 // 新增
 const addOpen = ref(false)
@@ -290,7 +294,7 @@ onUnmounted(stopCountdown)
       <div class="sub">Cookie 大约 24 小时轮换 · 失效后重新粘贴或用密码登录</div>
     </div>
 
-    <el-table :data="accounts" v-loading="loading" empty-text="还没有 iCloud 账号">
+    <el-table :data="pagedAccounts" v-loading="loading" empty-text="还没有 iCloud 账号">
       <el-table-column label="名称" prop="name" min-width="140">
         <template #default="{ row }">
           <div class="row-name">{{ row.name }}</div>
@@ -353,6 +357,8 @@ onUnmounted(stopCountdown)
         </template>
       </el-table-column>
     </el-table>
+
+    <ListPager v-model:page="page" v-model:page-size="pageSize" :total="total" />
 
     <!-- 新增账号 -->
     <el-dialog v-model="addOpen" title="添加 iCloud 账号" width="520px">

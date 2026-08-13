@@ -3,9 +3,13 @@ import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import type { TokenView } from '@/types'
+import ListPager from '@/components/ListPager.vue'
+import { usePagination } from '@/composables/usePagination'
 
 const tokens = ref<TokenView[]>([])
 const loading = ref(false)
+
+const { page, pageSize, total, paged: pagedTokens } = usePagination(tokens)
 
 const dialogOpen = ref(false)
 const newName = ref('')
@@ -89,7 +93,7 @@ onMounted(load)
       <div class="sub">secret 只在创建时显示一次,请交给使用方后自行保管。</div>
     </div>
 
-    <el-table :data="tokens" v-loading="loading" stripe empty-text="尚无 token">
+    <el-table :data="pagedTokens" v-loading="loading" stripe empty-text="尚无 token">
       <el-table-column label="ID" prop="id" width="130">
         <template #default="{ row }">
           <span class="mono meta">{{ row.id }}</span>
@@ -130,6 +134,8 @@ onMounted(load)
         </template>
       </el-table-column>
     </el-table>
+
+    <ListPager v-model:page="page" v-model:page-size="pageSize" :total="total" />
 
     <!-- 创建对话框 -->
     <el-dialog v-model="dialogOpen" title="新建 token" width="440px">
