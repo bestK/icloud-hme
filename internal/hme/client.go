@@ -722,7 +722,7 @@ func parseAliasList(body string) []Alias {
 			AnonymousID: firstNonEmpty(item.Get("anonymousId").String(), item.Get("id").String()),
 			Label:       firstNonEmpty(item.Get("label").String(), meta.Get("label").String()),
 			Active:      active,
-			CreatedAt:   firstNonEmpty(item.Get("createTimestamp").String(), item.Get("createdAt").String()),
+			CreatedAt:   aliasCreatedAt(item),
 		})
 		return true
 	})
@@ -735,6 +735,18 @@ func parseAliasList(body string) []Alias {
 		return aliases[i].Email < aliases[j].Email
 	})
 	return aliases
+}
+
+// aliasCreatedAt 取别名的创建时间,统一成 RFC3339。
+//
+// iCloud 给的 createTimestamp 是毫秒时间戳,原样透传出去接口里就混着
+// "1786201027219" 和别处的 RFC3339 两种格式,前端还得自己猜。少数响应
+// 直接给格式化好的 createdAt,那种保持原样。
+func aliasCreatedAt(item gjson.Result) string {
+	if ms := item.Get("createTimestamp").Int(); ms > 0 {
+		return time.UnixMilli(ms).Format(time.RFC3339)
+	}
+	return item.Get("createdAt").String()
 }
 
 // findFirstDictArray 递归查找第一个「对象数组」。

@@ -462,7 +462,8 @@ GET /api/aliases?account_id=acc_1
 - `anonymousId` — 别名唯一标识（用于停用/激活/删除）
 - `label` — 用户定义的标签
 - `active` — 是否激活
-- `createdAt` — 创建时间
+- `createdAt` — 创建时间,RFC3339。iCloud 上游给的是毫秒时间戳
+  (`createTimestamp`),这里已经转好,不会再出现裸时间戳
 
 ---
 

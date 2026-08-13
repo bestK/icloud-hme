@@ -119,6 +119,21 @@ function openInbox(a: Alias) {
   router.push({ path: '/inbox', query: { account_id: accountId.value, alias: a.email } })
 }
 
+// 列宽有限,今年的省掉年份。完整时间挂在 title 上。
+function fmtCreated(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const sameYear = d.getFullYear() === new Date().getFullYear()
+  return d.toLocaleString('zh-CN', {
+    year: sameYear ? undefined : 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
 watch(accountId, () => {
   resetPage()
   loadAliases()
@@ -180,6 +195,14 @@ onMounted(async () => {
           <span class="chip" :class="row.active ? 'active' : 'inactive'">
             {{ row.active ? 'active' : 'inactive' }}
           </span>
+        </template>
+      </el-table-column>
+      <el-table-column label="创建时间" prop="createdAt" width="170">
+        <template #default="{ row }">
+          <span v-if="row.createdAt" class="mono meta" :title="row.createdAt">
+            {{ fmtCreated(row.createdAt) }}
+          </span>
+          <span v-else class="dim">—</span>
         </template>
       </el-table-column>
       <el-table-column label="ID" prop="anonymousId" width="180">
