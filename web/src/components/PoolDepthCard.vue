@@ -13,6 +13,24 @@ const room = computed(() =>
   props.view.alias_counted ? props.view.alias_cap - props.view.alias_total : null,
 )
 
+// 撞了 iCloud 限流,补池整个停到这个时刻。不显示出来的话,深度不涨
+// 看着就像补池挂了。
+const cooling = computed(() => {
+  const until = props.view.cooldown_until
+  if (!until) return null
+  const t = new Date(until)
+  if (Number.isNaN(t.getTime()) || t.getTime() <= Date.now()) return null
+  return t
+})
+
+const coolingText = computed(() => {
+  const t = cooling.value
+  if (!t) return ''
+  const mins = Math.max(1, Math.round((t.getTime() - Date.now()) / 60000))
+  const clock = t.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  return `${clock} 恢复 · 约 ${mins} 分钟后`
+})
+
 const displayed = ref(0)
 let raf = 0
 
@@ -70,6 +88,10 @@ watch(
         <span class="k">还能再囤</span>
         <span v-if="room !== null" class="v mono">{{ room }} 个</span>
         <span v-else class="v mono dim">未核对</span>
+      </div>
+      <div v-if="cooling" class="note-line warn">
+        撞上 iCloud 限流 · 补池已暂停<br />
+        <span class="mono">{{ coolingText }}</span>
       </div>
       <div v-if="low" class="note-line warn">
         已跌破保障水位 · 高峰时可能要现场向 iCloud 申请

@@ -56,6 +56,8 @@ export interface PoolView {
   alias_counted: boolean
   /** Apple 给单账号的别名上限,补池真正的天花板 */
   alias_cap: number
+  /** 非空表示撞了 iCloud 限流,补池暂停到这个时刻 */
+  cooldown_until?: string
 }
 
 /** 定时补池调度器的运行快照 */
@@ -68,6 +70,8 @@ export interface FillerStatus {
   interval_seconds: number
   /** 同一轮内两次创建之间的间隔 */
   spacing_seconds: number
+  /** 撞上限流后暂停的时长 */
+  cooldown_seconds: number
   /** 每个账号能囤到的天花板 */
   hard_cap: number
   /** 为空表示还没跑过第一轮 */

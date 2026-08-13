@@ -24,6 +24,7 @@ type Filler struct {
 	target    int
 	hourlyMax int
 	spacing   time.Duration
+	cooldown  time.Duration
 
 	// 运行快照。补池是个看不见的后台动作,不把这些记下来,面板上就只能看到
 	// 池深度在变,回答不了"到底有没有在定时跑"。
@@ -48,6 +49,8 @@ type Status struct {
 	IntervalSeconds int `json:"interval_seconds"`
 	// SpacingSeconds 是同一轮内两次创建之间的间隔
 	SpacingSeconds int `json:"spacing_seconds"`
+	// CooldownSeconds 是撞上限流后暂停的时长
+	CooldownSeconds int `json:"cooldown_seconds"`
 	// HardCap 是每个账号能囤到的天花板(Apple 侧限制)
 	HardCap int `json:"hard_cap"`
 	// LastRunAt / NextRunAt 为空表示还没跑过第一轮
@@ -69,7 +72,11 @@ type Status struct {
 //
 // spacing 是同一轮内两次创建之间的间隔。一轮把剩余配额一次吃完意味着连着打
 // 十几个创建请求,这个密集程度本身就是风控信号,所以要把它们摊开。
-func NewFiller(mgr *account.Manager, store *Store, target, hourlyMax int, interval, spacing time.Duration) *Filler {
+//
+// cooldown 是撞上 iCloud 限流后这个账号停多久。hourlyMax 是我们自己猜的
+// 安全节奏,限流是对方给的明确答复 —— 收到之后就该整个停下来等,而不是等
+// 下一轮再去试探一次。
+func NewFiller(mgr *account.Manager, store *Store, target, hourlyMax int, interval, spacing, cooldown time.Duration) *Filler {
 	return &Filler{
 		mgr:       mgr,
 		store:     store,
@@ -77,6 +84,7 @@ func NewFiller(mgr *account.Manager, store *Store, target, hourlyMax int, interv
 		target:    target,
 		hourlyMax: hourlyMax,
 		spacing:   spacing,
+		cooldown:  cooldown,
 	}
 }
 
@@ -105,6 +113,7 @@ func (f *Filler) Status() Status {
 		HourlyMax:       f.hourlyMax,
 		IntervalSeconds: int(f.interval.Seconds()),
 		SpacingSeconds:  int(f.spacing.Seconds()),
+		CooldownSeconds: int(f.cooldown.Seconds()),
 		HardCap:         AliasHardCap,
 		LastAdded:       f.lastAdded,
 		TotalAdded:      f.totalAdded,
@@ -136,8 +145,8 @@ func (f *Filler) Start(ctx context.Context) {
 		log.Printf("pool filler 未启用 (target=%d hourly_max=%d interval=%s)", f.target, f.hourlyMax, f.interval)
 		return
 	}
-	log.Printf("pool filler 启动 target=%d interval=%s hourly_max=%d spacing=%s cap=%d",
-		f.target, f.interval, f.hourlyMax, f.spacing, AliasHardCap)
+	log.Printf("pool filler 启动 target=%d interval=%s hourly_max=%d spacing=%s cooldown=%s cap=%d",
+		f.target, f.interval, f.hourlyMax, f.spacing, f.cooldown, AliasHardCap)
 	f.mu.Lock()
 	f.running = true
 	f.nextRun = time.Now()
@@ -193,6 +202,15 @@ func (f *Filler) refillAccount(ctx context.Context, accountID string) int {
 	added := 0
 	for {
 		if ctx.Err() != nil {
+			return added
+		}
+
+		// 上游说过"现在不行",就等到它说的时候再来
+		if until := f.store.CooldownUntil(accountID); !until.IsZero() {
+			if added == 0 {
+				log.Printf("pool filler skip %s: 限流冷却中,%s 后恢复(%s)",
+					accountID, time.Until(until).Round(time.Second), until.Format(time.RFC3339))
+			}
 			return added
 		}
 
@@ -274,8 +292,12 @@ func (f *Filler) createOne(accountID string) bool {
 	if err != nil {
 		f.noteErr(accountID, err)
 		if hme.IsRateLimit(err.Error()) {
-			log.Printf("pool filler %s 触发限流,配额保留: %v", accountID, err)
-			// 触发限流的这次也算掉一次尝试(不 release),等下一小时
+			// 触发限流的这次也算掉一次尝试(不 release),并且整个账号停到
+			// 冷却结束 —— 否则下一轮配额还有余量,又会去撞一次。反复撞限流
+			// 本身就是最该避免的信号。
+			until := time.Now().Add(f.cooldown)
+			f.store.SetCooldown(accountID, until)
+			log.Printf("pool filler %s 触发限流,暂停到 %s: %v", accountID, until.Format(time.RFC3339), err)
 		} else {
 			log.Printf("pool filler %s create 失败: %v", accountID, err)
 			f.store.ReleaseQuota(accountID)

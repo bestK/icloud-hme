@@ -22,6 +22,7 @@
 //	POOL_HOURLY_MAX  每账号每小时最多真实 create 次数(默认 4;<=0 禁用池)。
 //	                 池空时的实时创建也记在这本账上
 //	POOL_SPACING     同一轮内两次创建之间的间隔(默认 20s),带 ±25% 抖动
+//	POOL_COOLDOWN    撞上 iCloud 限流后这个账号暂停多久(默认 1h)
 package main
 
 import (
@@ -82,6 +83,7 @@ func main() {
 		envInt("POOL_HOURLY_MAX", 4),
 		envDuration("POOL_INTERVAL", 15*time.Minute),
 		envDuration("POOL_SPACING", 20*time.Second),
+		envDuration("POOL_COOLDOWN", time.Hour),
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

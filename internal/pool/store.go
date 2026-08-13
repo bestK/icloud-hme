@@ -31,7 +31,10 @@ type Store struct {
 	mu       sync.Mutex
 	pools    map[string][]Entry
 	counters map[string]hourCounter
-	dataFile string
+	// cooldowns 记录每个账号"在此之前不要再向上游要别名"的时间点。
+	// 撞到 iCloud 限流后写入,进程重启也得留着 —— 重启就重试等于没退避。
+	cooldowns map[string]time.Time
+	dataFile  string
 }
 
 // NewStore 打开或创建 pool.json。
@@ -40,9 +43,10 @@ func NewStore(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		pools:    make(map[string][]Entry),
-		counters: make(map[string]hourCounter),
-		dataFile: filepath.Join(dataDir, "pool.json"),
+		pools:     make(map[string][]Entry),
+		counters:  make(map[string]hourCounter),
+		cooldowns: make(map[string]time.Time),
+		dataFile:  filepath.Join(dataDir, "pool.json"),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -59,8 +63,9 @@ func (s *Store) load() error {
 		return err
 	}
 	var wrapper struct {
-		Pools    map[string][]Entry     `json:"pools"`
-		Counters map[string]hourCounter `json:"hour_counters"`
+		Pools     map[string][]Entry     `json:"pools"`
+		Counters  map[string]hourCounter `json:"hour_counters"`
+		Cooldowns map[string]time.Time   `json:"cooldowns"`
 	}
 	if err := json.Unmarshal(raw, &wrapper); err != nil {
 		return err
@@ -71,6 +76,9 @@ func (s *Store) load() error {
 	if wrapper.Counters != nil {
 		s.counters = wrapper.Counters
 	}
+	if wrapper.Cooldowns != nil {
+		s.cooldowns = wrapper.Cooldowns
+	}
 	return nil
 }
 
@@ -78,10 +86,12 @@ func (s *Store) save() error {
 	wrapper := struct {
 		Pools     map[string][]Entry     `json:"pools"`
 		Counters  map[string]hourCounter `json:"hour_counters"`
+		Cooldowns map[string]time.Time   `json:"cooldowns"`
 		UpdatedAt string                 `json:"updated_at"`
 	}{
 		Pools:     s.pools,
 		Counters:  s.counters,
+		Cooldowns: s.cooldowns,
 		UpdatedAt: time.Now().Format(time.RFC3339),
 	}
 	raw, err := json.MarshalIndent(wrapper, "", "  ")
@@ -198,6 +208,28 @@ func (s *Store) ReleaseQuota(accountID string) {
 		s.counters[accountID] = cur
 		_ = s.save()
 	}
+}
+
+// SetCooldown 让某账号在 until 之前不再补池。
+//
+// 撞到 iCloud 限流时用:配额是我们自己定的节奏,限流是对方给的答复 ——
+// 对方说了"现在不行",就该整个停下来等,而不是等下一轮再去问一次。
+func (s *Store) SetCooldown(accountID string, until time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cooldowns[accountID] = until
+	_ = s.save()
+}
+
+// CooldownUntil 返回冷却结束时间。零值表示当前不在冷却中。
+func (s *Store) CooldownUntil(accountID string) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, ok := s.cooldowns[accountID]
+	if !ok || !until.After(time.Now()) {
+		return time.Time{}
+	}
+	return until
 }
 
 // HourUsage 返回某账号当前小时已用的配额数(仅本小时内有效,跨小时会清零)。

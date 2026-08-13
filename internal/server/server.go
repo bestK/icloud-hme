@@ -845,6 +845,18 @@ type poolView struct {
 	AliasTotal   int  `json:"alias_total"`
 	AliasCounted bool `json:"alias_counted"`
 	AliasCap     int  `json:"alias_cap"`
+	// CooldownUntil 非空表示这个账号撞了 iCloud 限流,补池暂停到这个时刻。
+	// 面板要看得见它,否则深度不涨会像是补池挂了。
+	CooldownUntil string `json:"cooldown_until,omitempty"`
+}
+
+// cooldownOf 返回账号的限流恢复时间,不在冷却中时为空串。
+func (s *Server) cooldownOf(accountID string) string {
+	until := s.pool.CooldownUntil(accountID)
+	if until.IsZero() {
+		return ""
+	}
+	return until.Format(time.RFC3339)
 }
 
 func (s *Server) listPool(c *gin.Context) {
@@ -876,6 +888,7 @@ func (s *Server) listPool(c *gin.Context) {
 			AliasTotal:    acc.AliasTotal,
 			AliasCounted:  acc.AliasCountedAt != "",
 			AliasCap:      pool.AliasHardCap,
+			CooldownUntil: s.cooldownOf(acc.ID),
 		})
 	}
 	// 处理已经删除但池里还残留的账号(异常情况)
@@ -884,12 +897,13 @@ func (s *Server) listPool(c *gin.Context) {
 			continue
 		}
 		out = append(out, poolView{
-			AccountID: id,
-			Depth:     depth,
-			Target:    target,
-			HourUsed:  s.pool.HourUsage(id),
-			HourlyMax: hourlyMax,
-			AliasCap:  pool.AliasHardCap,
+			AccountID:     id,
+			Depth:         depth,
+			Target:        target,
+			HourUsed:      s.pool.HourUsage(id),
+			HourlyMax:     hourlyMax,
+			AliasCap:      pool.AliasHardCap,
+			CooldownUntil: s.cooldownOf(id),
 		})
 	}
 	ok(c, out)

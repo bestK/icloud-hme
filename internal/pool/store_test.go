@@ -93,6 +93,46 @@ func TestRecordUsage_CountsWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestCooldown_ExpiresOnItsOwn(t *testing.T) {
+	s := newTempStore(t)
+	if !s.CooldownUntil("a").IsZero() {
+		t.Fatal("没设过冷却时不该有")
+	}
+
+	until := time.Now().Add(time.Hour)
+	s.SetCooldown("a", until)
+	if got := s.CooldownUntil("a"); got.IsZero() {
+		t.Fatal("刚设的冷却应该生效")
+	}
+
+	// 到点之后不需要谁来清,读的时候就该当它没了
+	s.SetCooldown("a", time.Now().Add(-time.Minute))
+	if got := s.CooldownUntil("a"); !got.IsZero() {
+		t.Fatalf("过期的冷却应视为不存在,got %v", got)
+	}
+}
+
+// 撞限流后重启进程就接着试,等于没退避 —— 冷却必须落盘。
+func TestCooldown_SurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	until := time.Now().Add(time.Hour).Round(time.Second)
+
+	s1, _ := NewStore(dir)
+	s1.SetCooldown("a", until)
+
+	s2, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s2.CooldownUntil("a")
+	if got.IsZero() {
+		t.Fatal("重新加载后冷却消失了")
+	}
+	if !got.Equal(until) {
+		t.Fatalf("恢复时间对不上,want %v got %v", until, got)
+	}
+}
+
 func TestQuota_StaleHourResets(t *testing.T) {
 	s := newTempStore(t)
 	// 伪造一个上个小时的计数,它应该在读的时候就被当成 0

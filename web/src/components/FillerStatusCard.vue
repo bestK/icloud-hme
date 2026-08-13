@@ -71,6 +71,7 @@ const leftText = computed(() => {
         {{ status.hard_cap }} 个别名的上限 —— 等需求上来了再建就来不及了。
         池深度低于 {{ status.target }} 个算见底。
         池空时的实时创建也占用上面这份每小时配额,补池会自动让路。
+        一旦撞上 iCloud 的限流,这个账号会整个停 {{ fmtInterval(status.cooldown_seconds) }}再试。
       </div>
 
       <div class="grid">
