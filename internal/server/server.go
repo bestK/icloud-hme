@@ -251,6 +251,13 @@ func (s *Server) createAlias(c *gin.Context) {
 	// 实时申请这条路径确实新增了一个上游别名,计入账号统计
 	s.mgr.ApplyAliasDelta(req.AccountID, account.AliasCreated)
 
+	// 也记进补池的小时账本。这条路径不受配额拦截(不能让用户的请求失败),
+	// 但它跟补池打的是同一个上游,不记的话补池会以为这一小时很闲、继续按满速
+	// 补,两边叠加出来的频率恰好在需求高峰时冲最高。记上之后补池会自动让路。
+	if s.pool != nil {
+		s.pool.RecordUsage(req.AccountID)
+	}
+
 	ok(c, gin.H{
 		"email":        result.Email,
 		"anonymous_id": result.AnonymousID,
@@ -833,9 +840,15 @@ type poolView struct {
 	AccountName   string `json:"account_name,omitempty"`
 	AccountStatus string `json:"account_status,omitempty"`
 	Depth         int    `json:"depth"`
-	Target        int    `json:"target"`
-	HourUsed      int    `json:"hour_used"`
-	HourlyMax     int    `json:"hourly_max"`
+	// Target 是最低保障水位,深度会一路涨过它,不是进度条的分母
+	Target    int `json:"target"`
+	HourUsed  int `json:"hour_used"`
+	HourlyMax int `json:"hourly_max"`
+	// AliasTotal / AliasCap:补池一直囤到 Apple 的别名上限为止,所以真正的
+	// 分母是这个。AliasCounted 为 false 时 AliasTotal 是"没核对过",不是 0 个。
+	AliasTotal   int  `json:"alias_total"`
+	AliasCounted bool `json:"alias_counted"`
+	AliasCap     int  `json:"alias_cap"`
 }
 
 func (s *Server) listPool(c *gin.Context) {
@@ -864,6 +877,9 @@ func (s *Server) listPool(c *gin.Context) {
 			Target:        target,
 			HourUsed:      s.pool.HourUsage(acc.ID),
 			HourlyMax:     hourlyMax,
+			AliasTotal:    acc.AliasTotal,
+			AliasCounted:  acc.AliasCountedAt != "",
+			AliasCap:      pool.AliasHardCap,
 		})
 	}
 	// 处理已经删除但池里还残留的账号(异常情况)
@@ -871,7 +887,14 @@ func (s *Server) listPool(c *gin.Context) {
 		if seen[id] {
 			continue
 		}
-		out = append(out, poolView{AccountID: id, Depth: depth, Target: target, HourUsed: s.pool.HourUsage(id), HourlyMax: hourlyMax})
+		out = append(out, poolView{
+			AccountID: id,
+			Depth:     depth,
+			Target:    target,
+			HourUsed:  s.pool.HourUsage(id),
+			HourlyMax: hourlyMax,
+			AliasCap:  pool.AliasHardCap,
+		})
 	}
 	ok(c, out)
 }

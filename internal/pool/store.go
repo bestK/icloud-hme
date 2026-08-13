@@ -135,6 +135,24 @@ func (s *Store) AllDepths() map[string]int {
 	return out
 }
 
+// currentHour 返回当前整点。配额按整点小时分桶,跨桶即清零。
+func currentHour() time.Time {
+	now := time.Now()
+	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
+}
+
+// counterFor 取某账号当前小时的计数器。留在上一个小时的旧计数一律当 0,
+// 这样跨小时清零只需在读的时候判断,不用起后台任务去扫。
+// 调用方必须已持有 s.mu。
+func (s *Store) counterFor(accountID string) hourCounter {
+	hourKey := currentHour()
+	cur := s.counters[accountID]
+	if !cur.Hour.Equal(hourKey) {
+		return hourCounter{Hour: hourKey, Count: 0}
+	}
+	return cur
+}
+
 // TryConsumeQuota 检查当前小时是否还有配额,有则计数 +1 返回 true。
 // hourlyMax<=0 表示禁用配额限制(总是返回 true)。
 func (s *Store) TryConsumeQuota(accountID string, hourlyMax int) bool {
@@ -143,12 +161,7 @@ func (s *Store) TryConsumeQuota(accountID string, hourlyMax int) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
-	hourKey := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
-	cur := s.counters[accountID]
-	if !cur.Hour.Equal(hourKey) {
-		cur = hourCounter{Hour: hourKey, Count: 0}
-	}
+	cur := s.counterFor(accountID)
 	if cur.Count >= hourlyMax {
 		s.counters[accountID] = cur
 		return false
@@ -159,11 +172,27 @@ func (s *Store) TryConsumeQuota(accountID string, hourlyMax int) bool {
 	return true
 }
 
+// RecordUsage 无条件记一次上游创建,不做配额检查也不会失败。
+//
+// 给池空时的实时创建用:那条路径不能因为配额耗尽就把用户挡回去,但它确实
+// 在上游建了一个别名。不记进同一个账本的话,补池会以为这一小时很闲、继续
+// 按满速补,两条路径叠加出来的真实创建频率就失控了 —— 而这恰恰发生在
+// 需求高峰,风控最容易盯上的时候。
+func (s *Store) RecordUsage(accountID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur := s.counterFor(accountID)
+	cur.Count++
+	s.counters[accountID] = cur
+	_ = s.save()
+}
+
 // ReleaseQuota 回滚一次 TryConsumeQuota(例如后续 create 失败但非限流,不消耗配额)。
+// 跨小时后旧计数已作废,此时回滚是空操作。
 func (s *Store) ReleaseQuota(accountID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cur := s.counters[accountID]
+	cur := s.counterFor(accountID)
 	if cur.Count > 0 {
 		cur.Count--
 		s.counters[accountID] = cur
@@ -175,11 +204,5 @@ func (s *Store) ReleaseQuota(accountID string) {
 func (s *Store) HourUsage(accountID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
-	hourKey := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
-	cur := s.counters[accountID]
-	if !cur.Hour.Equal(hourKey) {
-		return 0
-	}
-	return cur.Count
+	return s.counterFor(accountID).Count
 }

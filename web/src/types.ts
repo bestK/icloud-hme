@@ -47,18 +47,29 @@ export interface PoolView {
   /** 非 active 的账号会被定时补池跳过 */
   account_status?: string
   depth: number
+  /** 最低保障水位。深度会一路涨过它,不是进度条的分母 */
   target: number
   hour_used: number
   hourly_max: number
+  /** 账号已用掉的别名总数。alias_counted 为 false 时这个 0 是"没核对过" */
+  alias_total: number
+  alias_counted: boolean
+  /** Apple 给单账号的别名上限,补池真正的天花板 */
+  alias_cap: number
 }
 
 /** 定时补池调度器的运行快照 */
 export interface FillerStatus {
   enabled: boolean
   running: boolean
+  /** 最低保障水位,不是补池的终点 */
   target: number
   hourly_max: number
   interval_seconds: number
+  /** 同一轮内两次创建之间的间隔 */
+  spacing_seconds: number
+  /** 每个账号能囤到的天花板 */
+  hard_cap: number
   /** 为空表示还没跑过第一轮 */
   last_run_at?: string
   next_run_at?: string
@@ -99,5 +110,10 @@ export interface MailMessage {
   to: string
   subject: string
   date: string
+  /** 纯文本正文。没有 text/plain 分段时是从 HTML 剥出来的 */
   preview: string
+  /** text/html 原文。纯文本邮件、正文过大、或走 web_api 那条路时没有 */
+  html?: string
+  /** 邮件所在邮箱:INBOX / Junk */
+  folder?: string
 }

@@ -77,3 +77,38 @@ func TestQuota_ZeroMeansUnlimited(t *testing.T) {
 		}
 	}
 }
+
+// 实时创建那条路径不能被配额挡住,但必须记进同一本账,
+// 记完之后补池就该发现自己没配额了。
+func TestRecordUsage_CountsWithoutBlocking(t *testing.T) {
+	s := newTempStore(t)
+	for i := 0; i < 10; i++ {
+		s.RecordUsage("a")
+	}
+	if s.HourUsage("a") != 10 {
+		t.Fatalf("RecordUsage 应无视上限累计,got %d", s.HourUsage("a"))
+	}
+	if s.TryConsumeQuota("a", 4) {
+		t.Fatal("实时创建已用超配额,补池不该再拿到额度")
+	}
+}
+
+func TestQuota_StaleHourResets(t *testing.T) {
+	s := newTempStore(t)
+	// 伪造一个上个小时的计数,它应该在读的时候就被当成 0
+	s.counters["a"] = hourCounter{Hour: currentHour().Add(-time.Hour), Count: 4}
+
+	if s.HourUsage("a") != 0 {
+		t.Fatalf("跨小时后用量应清零,got %d", s.HourUsage("a"))
+	}
+	s.ReleaseQuota("a")
+	if s.HourUsage("a") != 0 {
+		t.Fatalf("回滚一个已作废的小时不该把用量变成负数或复活旧计数,got %d", s.HourUsage("a"))
+	}
+	if !s.TryConsumeQuota("a", 4) {
+		t.Fatal("新的小时应该重新有配额")
+	}
+	if s.HourUsage("a") != 1 {
+		t.Fatalf("新小时的第一次消费应记为 1,got %d", s.HourUsage("a"))
+	}
+}

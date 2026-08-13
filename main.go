@@ -15,9 +15,13 @@
 // 环境变量:
 //
 //	ADMIN_TOKEN      admin 主 token(必填)
-//	POOL_TARGET      每账号暖池目标深度(默认 10;<=0 禁用池)
+//	POOL_TARGET      每账号暖池最低保障水位(默认 10;<=0 禁用池)。这不是补池
+//	                 的终点 —— 只要配额还有余量就会一直囤,直到账号触及 Apple
+//	                 的 750 别名上限
 //	POOL_INTERVAL    补池间隔(默认 15m)
-//	POOL_HOURLY_MAX  每账号每小时最多真实 create 次数(默认 4;<=0 禁用池)
+//	POOL_HOURLY_MAX  每账号每小时最多真实 create 次数(默认 4;<=0 禁用池)。
+//	                 池空时的实时创建也记在这本账上
+//	POOL_SPACING     同一轮内两次创建之间的间隔(默认 20s),带 ±25% 抖动
 package main
 
 import (
@@ -77,6 +81,7 @@ func main() {
 		envInt("POOL_TARGET", 10),
 		envInt("POOL_HOURLY_MAX", 4),
 		envDuration("POOL_INTERVAL", 15*time.Minute),
+		envDuration("POOL_SPACING", 20*time.Second),
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

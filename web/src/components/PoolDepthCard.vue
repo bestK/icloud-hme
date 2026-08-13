@@ -1,8 +1,17 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { PoolView } from '@/types'
 
 const props = defineProps<{ view: PoolView }>()
+
+// 池子见底。target 现在只剩这一个用途:补池并不停在 target 上,
+// 它会一直囤到账号上限,所以低于 target 说明消耗已经快过补充了。
+const low = computed(() => props.view.depth < props.view.target)
+
+// 账号还能再建多少个。没核对过计数时给不出这个数,显示成未知而不是猜一个。
+const room = computed(() =>
+  props.view.alias_counted ? props.view.alias_cap - props.view.alias_total : null,
+)
 
 const displayed = ref(0)
 let raf = 0
@@ -40,8 +49,8 @@ watch(
     <div class="acct-tag">ACCT · {{ view.account_id.replace('acc_', '').toUpperCase() }}</div>
     <div class="label">这个账号的地址池深度 · 已建好待分配</div>
     <div class="number">
-      <span class="digits">{{ String(displayed).padStart(2, '0') }}</span>
-      <span class="of">/ {{ view.target }} 目标</span>
+      <span class="digits" :class="{ low }">{{ String(displayed).padStart(2, '0') }}</span>
+      <span class="of">保障水位 {{ view.target }} 个</span>
     </div>
 
     <div class="side">
@@ -57,7 +66,15 @@ watch(
         <span class="k">本小时已建</span>
         <span class="v mono">{{ view.hour_used }} / {{ view.hourly_max }}</span>
       </div>
-      <div v-if="view.account_status && view.account_status !== 'active'" class="skip">
+      <div class="side-row">
+        <span class="k">还能再囤</span>
+        <span v-if="room !== null" class="v mono">{{ room }} 个</span>
+        <span v-else class="v mono dim">未核对</span>
+      </div>
+      <div v-if="low" class="note-line warn">
+        已跌破保障水位 · 高峰时可能要现场向 iCloud 申请
+      </div>
+      <div v-if="view.account_status && view.account_status !== 'active'" class="note-line warn">
         账号状态 {{ view.account_status }} · 定时补池会跳过它
       </div>
     </div>
@@ -103,8 +120,9 @@ watch(
   letter-spacing: -0.04em;
   color: var(--ink);
   font-variant-numeric: tabular-nums lining-nums;
-  border-bottom: 4px solid var(--accent);
+  border-bottom: 4px solid var(--ok);
   padding-bottom: 4px;
+  &.low { border-bottom-color: var(--accent); }
 }
 .of {
   display: inline-block;
@@ -125,11 +143,13 @@ watch(
   /* 同上:键名改中文后去掉 uppercase 与宽字距 */
   .k { color: var(--dim); font-size: 12px; letter-spacing: 0.04em; }
   .v { font-size: 12px; color: var(--ink); }
+  .v.dim { color: var(--dim); }
 }
-.skip {
+.note-line {
   margin-top: 4px; padding-top: 8px;
   border-top: 1px dashed var(--rule);
-  color: var(--accent); font-size: 11px; line-height: 1.5;
+  font-size: 11px; line-height: 1.5;
+  &.warn { color: var(--accent); }
 }
 
 @media (max-width: 720px) {

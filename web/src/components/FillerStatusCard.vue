@@ -63,8 +63,14 @@ const leftText = computed(() => {
 
     <template v-if="status.enabled">
       <div class="rule-line">
-        每 {{ fmtInterval(status.interval_seconds) }}一轮 · 每个账号存够
-        {{ status.target }} 个 · 每账号每小时最多建 {{ status.hourly_max }} 个
+        每 {{ fmtInterval(status.interval_seconds) }}一轮 · 每账号每小时最多建
+        {{ status.hourly_max }} 个 · 同一轮内每 {{ fmtInterval(status.spacing_seconds) }}建一个
+      </div>
+      <div class="rule-line tight">
+        空闲时不会停在保障水位上,只要配额有余量就一直囤,直到账号触及
+        {{ status.hard_cap }} 个别名的上限 —— 等需求上来了再建就来不及了。
+        池深度低于 {{ status.target }} 个算见底。
+        池空时的实时创建也占用上面这份每小时配额,补池会自动让路。
       </div>
 
       <div class="grid">
@@ -120,6 +126,7 @@ const leftText = computed(() => {
 .rule-line {
   color: var(--dim); font-size: 12px; line-height: 1.7;
   padding: 10px 0 2px;
+  &.tight { padding-top: 0; }
 }
 .grid {
   display: grid; grid-template-columns: repeat(3, 1fr);
