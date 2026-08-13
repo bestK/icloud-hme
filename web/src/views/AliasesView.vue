@@ -17,8 +17,48 @@ const accountId = ref<string>('')
 const aliases = ref<Alias[]>([])
 const loading = ref(false)
 
+// 后端已经按创建时间降序返回,这里的默认排序跟它一致;点列头只是换个排序键。
+type SortKey = 'createdAt' | 'email' | 'active'
+const sortKey = ref<SortKey>('createdAt')
+const sortDesc = ref(true)
+
+// 没有创建时间的要沉到最后,升序降序都一样 —— 所以不能简单当 0,
+// 那会让它们在升序时浮到最前面。
+function timeOf(iso?: string): number {
+  const t = iso ? new Date(iso).getTime() : NaN
+  if (!Number.isNaN(t)) return t
+  return sortDesc.value ? -Infinity : Infinity
+}
+
+// 排序必须作用在整份列表上,再交给分页去切。只排当前页那一屏,翻页看到的
+// 顺序就是错的。
+const sortedAliases = computed(() => {
+  const dir = sortDesc.value ? -1 : 1
+  return [...aliases.value].sort((a, b) => {
+    let d = 0
+    if (sortKey.value === 'createdAt') d = timeOf(a.createdAt) - timeOf(b.createdAt)
+    else if (sortKey.value === 'email') d = a.email.localeCompare(b.email)
+    else d = Number(a.active) - Number(b.active)
+    // 同值时用邮箱兜底,免得每次重新渲染顺序都变
+    return d !== 0 ? d * dir : a.email.localeCompare(b.email)
+  })
+})
+
+function onSort({ prop, order }: { prop: string | null; order: string | null }) {
+  // 第三次点击是取消排序,回到默认的时间降序
+  sortKey.value = order && prop ? (prop as SortKey) : 'createdAt'
+  sortDesc.value = order ? order === 'descending' : true
+  resetPage()
+}
+
 // 一个账号最多能有几百个别名
-const { page, pageSize, total, paged: pagedAliases, reset: resetPage } = usePagination(aliases)
+const {
+  page,
+  pageSize,
+  total,
+  paged: pagedAliases,
+  reset: resetPage,
+} = usePagination(sortedAliases)
 
 const dialogOpen = ref(false)
 const newLabel = ref('')
@@ -173,8 +213,15 @@ onMounted(async () => {
       </div>
     </div>
 
-    <el-table :data="pagedAliases" v-loading="loading" :empty-text="emptyHint" stripe>
-      <el-table-column label="地址" prop="email" min-width="240">
+    <el-table
+      :data="pagedAliases"
+      v-loading="loading"
+      :empty-text="emptyHint"
+      stripe
+      :default-sort="{ prop: 'createdAt', order: 'descending' }"
+      @sort-change="onSort"
+    >
+      <el-table-column label="地址" prop="email" min-width="240" sortable="custom">
         <template #default="{ row }">
           <button
             class="email mono copyable"
@@ -190,14 +237,14 @@ onMounted(async () => {
           <span v-else class="dim">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="状态" prop="active" width="100">
+      <el-table-column label="状态" prop="active" width="110" sortable="custom">
         <template #default="{ row }">
           <span class="chip" :class="row.active ? 'active' : 'inactive'">
             {{ row.active ? 'active' : 'inactive' }}
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="创建时间" prop="createdAt" width="170">
+      <el-table-column label="创建时间" prop="createdAt" width="180" sortable="custom">
         <template #default="{ row }">
           <span v-if="row.createdAt" class="mono meta" :title="row.createdAt">
             {{ fmtCreated(row.createdAt) }}

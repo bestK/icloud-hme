@@ -727,14 +727,34 @@ func parseAliasList(body string) []Alias {
 		return true
 	})
 
-	// 活跃的排前面,再按邮箱字母序。
+	// 新建的排前面。别名是一个个攒出来的,"我刚建的那个"远比按字母找常见。
+	// 上游没给创建时间的沉到最后 —— 它们的位置本来就是猜的,不该混进时间序
+	// 中间;这些之间再按邮箱字母序,至少每次刷新顺序是稳的。
 	sort.SliceStable(aliases, func(i, j int) bool {
-		if aliases[i].Active != aliases[j].Active {
-			return aliases[i].Active
+		ti, oki := parseAliasTime(aliases[i].CreatedAt)
+		tj, okj := parseAliasTime(aliases[j].CreatedAt)
+		if oki != okj {
+			return oki
+		}
+		if oki && !ti.Equal(tj) {
+			return ti.After(tj)
 		}
 		return aliases[i].Email < aliases[j].Email
 	})
 	return aliases
+}
+
+// parseAliasTime 解析别名创建时间。aliasCreatedAt 已经统一成 RFC3339,
+// 解析不了的一律当"没有时间"。
+func parseAliasTime(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // aliasCreatedAt 取别名的创建时间,统一成 RFC3339。
