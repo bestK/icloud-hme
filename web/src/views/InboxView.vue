@@ -5,7 +5,6 @@ import { ElMessage } from 'element-plus'
 import { api } from '@/api'
 import type { MailMessage } from '@/types'
 import ListPager from '@/components/ListPager.vue'
-import { usePagination } from '@/composables/usePagination'
 
 const route = useRoute()
 const router = useRouter()
@@ -18,8 +17,14 @@ const method = ref<'imap' | 'web_api' | ''>('')
 
 const mode = ref<'html' | 'raw'>('html')
 
-// 邮件是整块正文,一屏放不下几封,每页给得比表格少
-const { page, pageSize, total, paged: pagedMessages, reset: resetPage } = usePagination(messages, 10)
+// 服务端分页:每翻一页都重新向后端要那一页。
+// 邮箱里的信可能有几百封,一次全取回来光正文就是几十兆;而且总数得由后端
+// 给 —— 前端只看得见自己手里这一页,拿它算页数就成了假分页。
+// 邮件是整块正文,一屏放不下几封,每页给得比表格少。
+const page = ref(1)
+const pageSize = ref(10)
+const total = ref(0)
+const totalExact = ref(true)
 
 // IMAP 的 UID 只在单个邮箱内唯一,收件箱和垃圾箱合并之后会撞号,
 // 得连邮箱名一起当键,否则展开一封会连带展开另一封。
@@ -41,13 +46,23 @@ function snippet(text: string) {
 }
 
 async function load() {
-  if (!accountId.value || !alias.value) { messages.value = []; return }
+  if (!accountId.value || !alias.value) {
+    messages.value = []
+    total.value = 0
+    return
+  }
   loading.value = true
   try {
-    const r = await api.inbox(accountId.value, alias.value)
+    const r = await api.inbox(
+      accountId.value,
+      alias.value,
+      pageSize.value,
+      (page.value - 1) * pageSize.value,
+    )
     messages.value = r.messages || []
+    total.value = r.total
+    totalExact.value = r.total_exact
     method.value = r.method
-    resetPage()
     opened.value = new Set(messages.value.slice(0, 1).map(keyOf))
   } catch (e: any) {
     ElMessage.error(e?.message || '读取失败')
@@ -55,6 +70,16 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+// 翻页、改每页条数都得重新去后端取
+watch([page, pageSize], load)
+
+// 换了查询条件就回第一页。已经在第一页时上面的 watch 不会触发,
+// 得自己去读一次 —— 否则换个别名点查询会毫无反应。
+function reload() {
+  if (page.value === 1) load()
+  else page.value = 1
 }
 
 // 邮件 HTML 是外部内容:直接塞进面板 DOM,它的 CSS 会污染整页,<script> 更是
@@ -97,14 +122,14 @@ function apply() {
   const unchanged =
     route.query.account_id === accountId.value && route.query.alias === alias.value
   router.replace({ query: { account_id: accountId.value, alias: alias.value } })
-  if (unchanged) load()
+  if (unchanged) reload()
 }
 
 // URL 变化:浏览器前进后退,或从别名页带着参数跳进来
 watch(() => [route.query.account_id, route.query.alias], ([acc, al]) => {
   accountId.value = (acc as string) || ''
   alias.value = (al as string) || ''
-  load()
+  reload()
 })
 onMounted(load)
 </script>
@@ -130,7 +155,8 @@ onMounted(load)
       </div>
     </div>
 
-    <div v-if="loading" class="empty">正在读取邮件…</div>
+    <!-- 翻页时保留上一页的列表(只压暗),不然每翻一页整块内容都要闪一下 -->
+    <div v-if="loading && !messages.length" class="empty">正在读取邮件…</div>
     <div v-else-if="!alias" class="empty">
       <div class="status-mark">未选择别名</div>
       <p>填一个别名地址,查看它收到的邮件。</p>
@@ -139,8 +165,8 @@ onMounted(load)
       <div class="status-mark">暂无邮件</div>
       <p>{{ alias }} 目前没有邮件。</p>
     </div>
-    <ul v-else class="messages">
-      <li v-for="m in pagedMessages" :key="keyOf(m)" class="message">
+    <ul v-else class="messages" :class="{ busy: loading }">
+      <li v-for="m in messages" :key="keyOf(m)" class="message">
         <button class="head" type="button" :aria-expanded="isOpen(m)" @click="toggle(m)">
           <div class="from">
             <span class="eyebrow">来自</span>
@@ -173,6 +199,9 @@ onMounted(load)
       </li>
     </ul>
 
+    <div v-if="total && !totalExact" class="caveat pager-note">
+      Web API 给不出邮件总数,这里的页数是按已经取回的算的 —— 后面可能还有更早的邮件没算进去。
+    </div>
     <ListPager v-model:page="page" v-model:page-size="pageSize" :total="total" />
   </section>
 </template>
@@ -198,6 +227,8 @@ onMounted(load)
   margin-top: -8px;
   margin-bottom: 12px;
 }
+/* 同样的说明文字挂在分页器上方时,不需要那段贴紧标题用的负 margin */
+.caveat.pager-note { margin-top: 14px; margin-bottom: -6px; }
 
 .empty {
   padding: 60px 20px;
@@ -216,7 +247,13 @@ onMounted(load)
   margin-bottom: 12px;
 }
 
-.messages { list-style: none; margin: 0; padding: 0; }
+.messages {
+  list-style: none; margin: 0; padding: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+/* 翻页请求还在路上:列表仍是上一页的内容,压暗并挡住点击,
+   免得点开一封马上就被新一页替换掉 */
+.messages.busy { opacity: 0.55; pointer-events: none; }
 .message {
   border-bottom: 1px dashed var(--rule);
   padding: 18px 0;

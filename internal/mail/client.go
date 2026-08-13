@@ -58,6 +58,47 @@ type FullMessage struct {
 	ContentType string `json:"content_type"`
 }
 
+// Page 是一页邮件,外加它在完整结果集里的位置。
+type Page struct {
+	Messages []Message
+	// Total 是整个结果集的条数,不是本页条数。Exact 为 false 时它只是
+	// "至少这么多" —— Web API 那条路给不出总数,只能报已经看到的。
+	Total int
+	Exact bool
+}
+
+// candidate 是分页第一阶段的产物:定位和排序要用的最少信息,不含正文。
+//
+// 分页得先知道总数和全局顺序才能切页,而正文是整个流程里最贵的一步
+// (营销邮件动辄几百 KB)。所以先只取信封排序,切出当前页,再去拉那一页
+// 的正文 —— 否则翻第 1 页也要把几百封信的正文全下载一遍。
+type candidate struct {
+	box  string
+	uid  uint32
+	date time.Time
+	// to 供服务端搜不动时在本地按收件人过滤
+	to string
+}
+
+// maxCandidates 是单个邮箱参与分页的邮件数上限。
+//
+// 不限日期时一个邮箱可能有上万封,把信封全拉回来排序不值当。取最近这些
+// 已经够翻很多页了,代价是 Page.Exact 会变成 false。
+const maxCandidates = 2000
+
+// slicePage 从一份已经排好序的完整列表里切出一页。
+func slicePage(msgs []Message, limit, offset int, exact bool) Page {
+	total := len(msgs)
+	if offset >= total {
+		return Page{Messages: []Message{}, Total: total, Exact: exact}
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return Page{Messages: msgs[offset:end], Total: total, Exact: exact}
+}
+
 // Client 是 iCloud 邮件 IMAP 客户端。
 type Client struct {
 	appleID     string
@@ -107,31 +148,67 @@ func (c *Client) InboxCount() (int, error) {
 	return int(mbox.Messages), nil
 }
 
-// ListInbox 拉取收件箱和垃圾箱最近 limit 封邮件摘要。
+// ListInbox 按页拉取收件箱和垃圾箱的邮件摘要。
 //
 // days 用于过滤只看近 N 天的邮件(0 表示不限制)。
 // 返回按时间倒序排列。
-func (c *Client) ListInbox(limit int, days int) ([]Message, error) {
+func (c *Client) ListInbox(limit, offset, days int) (Page, error) {
+	return c.page(limit, offset, days, "")
+}
+
+// FindByRecipient 按页查找发给指定隐私邮箱别名的邮件,收件箱和垃圾箱都找。
+func (c *Client) FindByRecipient(recipient string, limit, offset, days int) (Page, error) {
+	return c.page(limit, offset, days, recipient)
+}
+
+// page 是两个列表接口共用的分页实现。recipient 非空时只要发给它的邮件。
+//
+// 先把各邮箱的信封收齐排好序,再只拉当前页的正文。总数来自排序后的完整
+// 候选集,所以分页器上的页数是真的 —— 不像"拉 20 封再切两页"那样,翻到
+// 底了还有更早的邮件没被取过。
+func (c *Client) page(limit, offset, days int, recipient string) (Page, error) {
 	if c.cli == nil {
-		return nil, fmt.Errorf("未连接")
+		return Page{}, fmt.Errorf("未连接")
 	}
 	if limit <= 0 {
-		limit = 50
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
 	}
 
-	var out []Message
+	var all []candidate
+	exact := true
 	for _, box := range c.mailboxes() {
-		msgs, err := c.listMailbox(box, limit, days)
+		cands, truncated, err := c.candidates(box, recipient, days)
 		if err != nil {
 			// 垃圾箱读不到不该让整个请求失败,收件箱的信还是要给出去
 			if box == inboxName {
-				return nil, err
+				return Page{}, err
 			}
 			continue
 		}
-		out = append(out, msgs...)
+		if truncated {
+			exact = false
+		}
+		all = append(all, cands...)
 	}
-	return capNewest(out, limit), nil
+
+	sort.SliceStable(all, func(i, j int) bool { return all[i].date.After(all[j].date) })
+
+	total := len(all)
+	if offset >= total {
+		return Page{Messages: []Message{}, Total: total, Exact: exact}, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	msgs, err := c.fetchPage(all[offset:end])
+	if err != nil {
+		return Page{}, err
+	}
+	return Page{Messages: msgs, Total: total, Exact: exact}, nil
 }
 
 // mailboxes 返回要读的邮箱:收件箱 + 垃圾箱(如果有)。
@@ -183,49 +260,93 @@ func (c *Client) findJunk() string {
 	return c.junk
 }
 
-// listMailbox 拉取单个邮箱最近 limit 封邮件。
-func (c *Client) listMailbox(box string, limit int, days int) ([]Message, error) {
-	mbox, err := c.cli.Select(box, true)
+// candidates 收集单个邮箱里符合条件的邮件,只取信封不取正文。
+// 第二个返回值表示候选集是否因为超过 maxCandidates 被截断过。
+func (c *Client) candidates(box, recipient string, days int) ([]candidate, bool, error) {
+	if _, err := c.cli.Select(box, true); err != nil {
+		return nil, false, err
+	}
+
+	uids, serverFiltered, err := c.searchUIDs(recipient, days)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	total := int(mbox.Messages)
-	if total == 0 {
-		return []Message{}, nil
+	if len(uids) == 0 {
+		return nil, false, nil
 	}
-
-	// 计算起始序号(只取最近 limit 封)
-	from := uint32(1)
-	if uint32(limit) < mbox.Messages {
-		from = mbox.Messages - uint32(limit) + 1
+	truncated := false
+	if len(uids) > maxCandidates {
+		uids = uids[len(uids)-maxCandidates:] // UID 递增,留最近的
+		truncated = true
 	}
 
+	cands, err := c.envelopes(box, uids)
+	if err != nil {
+		return nil, false, err
+	}
+	if recipient == "" || serverFiltered {
+		return cands, truncated, nil
+	}
+
+	// 服务端 TO 搜索没结果时退回本地过滤:别名可能出现在 To 或 Cc 里,
+	// 服务器对 HME 地址的索引也未必可靠,宁可自己再筛一遍。
+	want := strings.ToLower(recipient)
+	kept := cands[:0]
+	for _, cd := range cands {
+		if strings.Contains(strings.ToLower(cd.to), want) {
+			kept = append(kept, cd)
+		}
+	}
+	return kept, truncated, nil
+}
+
+// searchUIDs 找出候选邮件的 UID。第二个返回值表示服务端是否已经按
+// recipient 过滤过 —— 没有的话调用方得在本地再筛一遍。
+func (c *Client) searchUIDs(recipient string, days int) ([]uint32, bool, error) {
+	base := imap.NewSearchCriteria()
+	if days > 0 {
+		base.Since = time.Now().AddDate(0, 0, -days)
+	}
+
+	if recipient != "" {
+		withTo := imap.NewSearchCriteria()
+		withTo.Since = base.Since
+		withTo.Header.Add("To", recipient)
+		if uids, err := c.cli.UidSearch(withTo); err == nil && len(uids) > 0 {
+			return uids, true, nil
+		}
+	}
+
+	uids, err := c.cli.UidSearch(base)
+	if err != nil {
+		return nil, false, err
+	}
+	return uids, recipient == "", nil
+}
+
+// envelopes 批量取信封。这一步刻意不要正文 —— 它只服务于排序和计数。
+func (c *Client) envelopes(box string, uids []uint32) ([]candidate, error) {
 	seqset := new(imap.SeqSet)
-	seqset.AddRange(from, mbox.Messages)
-
-	// 拉取完整正文,以便填充 Preview(OTP 验证码在正文中)
-	section := &imap.BodySectionName{}
-	items := []imap.FetchItem{
-		imap.FetchUid,
-		imap.FetchEnvelope,
-		imap.FetchInternalDate,
-		section.FetchItem(),
+	for _, uid := range uids {
+		seqset.AddNum(uid)
 	}
-
-	messages := make(chan *imap.Message, limit)
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate}
+	messages := make(chan *imap.Message, len(uids))
 	done := make(chan error, 1)
 	go func() {
-		done <- c.cli.Fetch(seqset, items, messages)
+		done <- c.cli.UidFetch(seqset, items, messages)
 	}()
 
-	var out []Message
+	out := make([]candidate, 0, len(uids))
 	for msg := range messages {
-		m := toMessageWithBody(msg)
-		m.Folder = box
-		if days > 0 && olderThan(m.Date, days) {
-			continue
+		m := toMessage(msg)
+		cd := candidate{box: box, uid: msg.Uid, to: m.To, date: msg.InternalDate}
+		// 优先用信头日期,跟列表里显示的时间保持一致;它缺失或坏掉时
+		// 退回服务器收信时间,总比把这封信排到最后强。
+		if t, ok := parseDate(m.Date); ok {
+			cd.date = t
 		}
-		out = append(out, m)
+		out = append(out, cd)
 	}
 	if err := <-done; err != nil {
 		return nil, err
@@ -233,74 +354,50 @@ func (c *Client) listMailbox(box string, limit int, days int) ([]Message, error)
 	return out, nil
 }
 
-// FindByRecipient 查找发给指定隐私邮箱别名的邮件,收件箱和垃圾箱都找。
+// fetchPage 把当前页这几封邮件连正文一起取回来。
 //
-// 每个邮箱先试服务端 TO 搜索,搜不到再拉回来本地过滤。
-func (c *Client) FindByRecipient(recipient string, limit int, days int) ([]Message, error) {
-	if c.cli == nil {
-		return nil, fmt.Errorf("未连接")
-	}
-	if limit <= 0 {
-		limit = 20
-	}
-
-	var out []Message
-	for _, box := range c.mailboxes() {
-		msgs, err := c.searchMailbox(box, recipient, limit, days)
-		if err != nil {
-			if box == inboxName {
-				return nil, err
-			}
-			continue
+// 按邮箱分组是因为 UID 只在单个邮箱内唯一,收件箱和垃圾箱的 UID 混进
+// 同一个 FETCH 会取错信。
+func (c *Client) fetchPage(cands []candidate) ([]Message, error) {
+	byBox := make(map[string][]uint32)
+	order := make([]string, 0, 2)
+	for _, cd := range cands {
+		if _, seen := byBox[cd.box]; !seen {
+			order = append(order, cd.box)
 		}
-		out = append(out, msgs...)
-	}
-	return capNewest(out, limit), nil
-}
-
-// searchMailbox 在单个邮箱里找发给 recipient 的邮件。
-func (c *Client) searchMailbox(box, recipient string, limit int, days int) ([]Message, error) {
-	if _, err := c.cli.Select(box, true); err != nil {
-		return nil, err
+		byBox[cd.box] = append(byBox[cd.box], cd.uid)
 	}
 
-	criteria := imap.NewSearchCriteria()
-	criteria.Header.Add("To", recipient)
-	if days > 0 {
-		criteria.Since = time.Now().AddDate(0, 0, -days)
-	}
-	uids, err := c.cli.UidSearch(criteria)
-	if err == nil && len(uids) > 0 {
-		return c.fetchByUIDs(box, uids, limit)
+	got := make(map[string]Message, len(cands))
+	for _, box := range order {
+		msgs, err := c.fetchByUIDs(box, byBox[box])
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range msgs {
+			got[box+"/"+m.ID] = m
+		}
 	}
 
-	// fallback: 拉回来本地按收件人过滤。别名会出现在 To 或 Cc 里,
-	// 也可能只在 Delivered-To 上 —— 服务端搜不到时宁可多扫几封。
-	all, err := c.listMailbox(box, limit*3, days)
-	if err != nil {
-		return nil, err
-	}
-	recipient = strings.ToLower(recipient)
-	var out []Message
-	for _, m := range all {
-		if strings.Contains(strings.ToLower(m.To), recipient) {
+	// FETCH 不保证返回顺序,按排好的候选顺序还原
+	out := make([]Message, 0, len(cands))
+	for _, cd := range cands {
+		if m, ok := got[fmt.Sprintf("%s/%d", cd.box, cd.uid)]; ok {
 			out = append(out, m)
-			if len(out) >= limit {
-				break
-			}
 		}
 	}
 	return out, nil
 }
 
-func (c *Client) fetchByUIDs(box string, uids []uint32, limit int) ([]Message, error) {
+// fetchByUIDs 取指定 UID 的邮件,含完整正文。
+func (c *Client) fetchByUIDs(box string, uids []uint32) ([]Message, error) {
 	if len(uids) == 0 {
 		return []Message{}, nil
 	}
-	// 取最近 limit 条(UID 倒序)
-	if len(uids) > limit {
-		uids = uids[len(uids)-limit:]
+	if _, err := c.cli.Select(box, true); err != nil {
+		return nil, err
 	}
+
 	seqset := new(imap.SeqSet)
 	for _, uid := range uids {
 		seqset.AddNum(uid)
@@ -376,18 +473,8 @@ func parseDate(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// olderThan 判断邮件是否早于 days 天。解析不出日期就当它没超期,
-// 宁可多显示一封,也不要因为解析失败静默吞掉邮件。
-func olderThan(date string, days int) bool {
-	t, ok := parseDate(date)
-	if !ok {
-		return false
-	}
-	return time.Since(t) > time.Duration(days)*24*time.Hour
-}
-
-// capNewest 把多个邮箱合并来的邮件按时间倒序排好,再截到 limit 封。
-func capNewest(msgs []Message, limit int) []Message {
+// sortNewest 把多个邮箱合并来的邮件按时间倒序排好。
+func sortNewest(msgs []Message) []Message {
 	if msgs == nil {
 		return []Message{}
 	}
@@ -399,9 +486,6 @@ func capNewest(msgs []Message, limit int) []Message {
 		}
 		return ti.After(tj)
 	})
-	if limit > 0 && len(msgs) > limit {
-		msgs = msgs[:limit]
-	}
 	return msgs
 }
 

@@ -225,18 +225,34 @@ func (c *WebClient) search(payload string) ([]Message, error) {
 // webJunkName 是 mailws2 里垃圾箱的文件夹名。
 const webJunkName = "Junk"
 
-// ListInbox 列出收件箱和垃圾箱的邮件,按时间倒序合并。
-func (c *WebClient) ListInbox(limit int) ([]Message, error) {
-	msgs, err := c.listFolder(inboxName, limit)
+// ListInbox 按页列出收件箱和垃圾箱的邮件,按时间倒序合并。
+//
+// Web API 只能按 maxResults 拉一批,给不出结果集总数(totalThreadsReturned
+// 说的是这次返回了几条),所以这里多拉一点再本地切页 —— 翻页不会漏,但
+// Page.Total 只是"至少这么多",Exact 为 false。IMAP 那条路才有准数。
+func (c *WebClient) ListInbox(limit, offset int) (Page, error) {
+	msgs, err := c.window(offset + limit)
+	if err != nil {
+		return Page{}, err
+	}
+	return slicePage(msgs, limit, offset, false), nil
+}
+
+// window 拉一批足够覆盖到 need 条的邮件,收件箱和垃圾箱合并后按时间倒序。
+func (c *WebClient) window(need int) ([]Message, error) {
+	if need < 50 {
+		need = 50
+	}
+	msgs, err := c.listFolder(inboxName, need)
 	if err != nil {
 		return nil, err
 	}
 	// 垃圾箱读失败不该连收件箱一起丢掉 —— 验证码常在这里,值得一试,
 	// 但它不是这个接口的成败所在。
-	if junk, err := c.listFolder(webJunkName, limit); err == nil {
+	if junk, err := c.listFolder(webJunkName, need); err == nil {
 		msgs = append(msgs, junk...)
 	}
-	return capNewest(msgs, limit), nil
+	return sortNewest(msgs), nil
 }
 
 // listFolder 列出指定文件夹的邮件。
@@ -252,31 +268,25 @@ func (c *WebClient) listFolder(folder string, limit int) ([]Message, error) {
 	return msgs, nil
 }
 
-// FindByAlias 查找发给指定别名的邮件——在本地过滤(Web API 不支持收件人搜索)。
-func (c *WebClient) FindByAlias(alias string, limit int) ([]Message, error) {
-	// 拉取收件箱全部邮件(最多取 2*limit),本地过滤
-	batchSize := limit * 2
-	if batchSize < 50 {
-		batchSize = 50
-	}
-	raw, err := c.ListInbox(batchSize)
+// FindByAlias 按页查找发给指定别名的邮件——在本地过滤(Web API 不支持收件人搜索)。
+func (c *WebClient) FindByAlias(alias string, limit, offset int) (Page, error) {
+	// 过滤会筛掉绝大部分,窗口得开得比目标页大出不少才够切
+	msgs, err := c.window((offset + limit) * 3)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
 
 	// 本地过滤: To/CC/BCC 或主题中包含 alias
+	want := strings.ToLower(alias)
 	filtered := make([]Message, 0, limit)
-	for _, m := range raw {
-		if strings.Contains(strings.ToLower(m.Subject), strings.ToLower(alias)) ||
-			strings.Contains(strings.ToLower(m.From), strings.ToLower(alias)) ||
-			strings.Contains(strings.ToLower(m.To), strings.ToLower(alias)) {
+	for _, m := range msgs {
+		if strings.Contains(strings.ToLower(m.Subject), want) ||
+			strings.Contains(strings.ToLower(m.From), want) ||
+			strings.Contains(strings.ToLower(m.To), want) {
 			filtered = append(filtered, m)
-			if len(filtered) >= limit {
-				break
-			}
 		}
 	}
-	return filtered, nil
+	return slicePage(filtered, limit, offset, false), nil
 }
 
 func truncate(s string, n int) string {

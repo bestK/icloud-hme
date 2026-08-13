@@ -172,12 +172,21 @@ export const api = {
       (await http.delete(`/aliases/${anonymousId}`, { data: { account_id: accountId } })).data,
     ),
 
-  inbox: async (accountId: string, alias: string, limit = 20) =>
+  inbox: async (accountId: string, alias: string, limit = 20, offset = 0) =>
     unwrap<{
       account_id: string
       alias?: string
+      /** 本页条数 */
       count: number
       messages: MailMessage[]
       method: 'imap' | 'web_api'
-    }>((await http.get('/inbox', { params: { account_id: accountId, alias, limit } })).data),
+      limit: number
+      offset: number
+      /** 整个结果集的条数,不是本页的 */
+      total: number
+      /** false 表示 total 只是"至少这么多"(Web API 给不出真实总数) */
+      total_exact: boolean
+    }>(
+      (await http.get('/inbox', { params: { account_id: accountId, alias, limit, offset } })).data,
+    ),
 }

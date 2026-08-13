@@ -288,6 +288,7 @@ func (s *Server) listInbox(c *gin.Context) {
 	}
 	alias := strings.TrimSpace(c.Query("alias"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
 
 	if !isAdmin(c) {
@@ -301,25 +302,35 @@ func (s *Server) listInbox(c *gin.Context) {
 		}
 	}
 
+	respond := func(page mail.Page, method string) {
+		ok(c, gin.H{
+			"account_id": accountID,
+			"alias":      alias,
+			"count":      len(page.Messages),
+			"messages":   page.Messages,
+			"method":     method,
+			"limit":      limit,
+			"offset":     offset,
+			// total 是整个结果集的条数,不是本页的。total_exact 为 false 时
+			// 它只是"至少这么多",前端不能拿它当准确页数用。
+			"total":       page.Total,
+			"total_exact": page.Exact,
+		})
+	}
+
 	// 优先使用 IMAP (App Password 认证)
 	mc, err := s.mgr.MailClient(accountID)
 	if err == nil {
 		if connErr := mc.Connect(); connErr == nil {
 			defer mc.Disconnect()
-			var messages []mail.Message
+			var page mail.Page
 			if alias != "" {
-				messages, err = mc.FindByRecipient(alias, limit, days)
+				page, err = mc.FindByRecipient(alias, limit, offset, days)
 			} else {
-				messages, err = mc.ListInbox(limit, days)
+				page, err = mc.ListInbox(limit, offset, days)
 			}
 			if err == nil {
-				ok(c, gin.H{
-					"account_id": accountID,
-					"alias":      alias,
-					"count":      len(messages),
-					"messages":   messages,
-					"method":     "imap",
-				})
+				respond(page, "imap")
 				return
 			}
 			// IMAP 失败，继续尝试 Web API
@@ -333,32 +344,17 @@ func (s *Server) listInbox(c *gin.Context) {
 		return
 	}
 
+	var page mail.Page
 	if alias != "" {
-		messages, err := wmc.FindByAlias(alias, limit)
-		if err != nil {
-			failUpstream(c, "读取邮件失败", err)
-			return
-		}
-		ok(c, gin.H{
-			"account_id": accountID,
-			"alias":      alias,
-			"count":      len(messages),
-			"messages":   messages,
-			"method":     "web_api",
-		})
+		page, err = wmc.FindByAlias(alias, limit, offset)
 	} else {
-		messages, err := wmc.ListInbox(limit)
-		if err != nil {
-			failUpstream(c, "读取邮件失败", err)
-			return
-		}
-		ok(c, gin.H{
-			"account_id": accountID,
-			"count":      len(messages),
-			"messages":   messages,
-			"method":     "web_api",
-		})
+		page, err = wmc.ListInbox(limit, offset)
 	}
+	if err != nil {
+		failUpstream(c, "读取邮件失败", err)
+		return
+	}
+	respond(page, "web_api")
 }
 
 // ====================================================================

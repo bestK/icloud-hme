@@ -122,7 +122,7 @@ Content-Type: application/json
 ### 2. 读取邮件
 
 ```http
-GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
+GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&offset=0&days=7
 ```
 
 **响应 (走 IMAP,App Password):**
@@ -133,6 +133,10 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
     "account_id": "acc_1",
     "alias": "xyz123@icloud.com",
     "count": 2,
+    "limit": 20,
+    "offset": 0,
+    "total": 137,
+    "total_exact": true,
     "method": "imap",
     "messages": [
       {
@@ -158,6 +162,10 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
     "account_id": "acc_1",
     "alias": "xyz123@icloud.com",
     "count": 1,
+    "limit": 20,
+    "offset": 0,
+    "total": 1,
+    "total_exact": false,
     "method": "web_api",
     "messages": [
       {
@@ -176,8 +184,20 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
 **参数说明:**
 - `account_id` (必填) — 账号 ID
 - `alias` (可选) — 只返回发到该别名的邮件;不传返回收件箱最近邮件
-- `limit` (可选) — 返回邮件数量，默认 20
+- `limit` (可选) — 每页条数，默认 20
+- `offset` (可选) — 跳过前几条，默认 0。配合 `limit` 翻页
 - `days` (可选) — 查找最近几天的邮件，默认 7 (仅 IMAP 模式)
+
+**分页 (`total` / `total_exact`):**
+
+`count` 是本页条数,`total` 是整个结果集的条数 —— 客户端拿 `total` 算页数,
+别拿 `count`。`total_exact` 为 `false` 时 `total` 只是"至少这么多",不能当准数:
+
+- **IMAP** — `total_exact: true`。先搜出全部匹配的 UID 再排序切页,总数是准的。
+  单个邮箱的候选上限 2000 封(不限 `days` 时邮箱可能有上万封),超过会截断并把
+  `total_exact` 置为 `false`
+- **Web API** — 恒为 `false`。上游 `thread/search` 只有 `maxResults`,给不出结果集
+  总数,只能按 `offset+limit` 拉一个窗口回来本地切,后面可能还有更早的邮件
 
 **邮件读取双路径 (自动选择):**
 1. **优先: IMAP (App Password)** — 设置了 App Password 时使用,支持服务端按收件人搜索
@@ -186,8 +206,12 @@ GET /api/inbox?account_id=acc_1&alias=xyz123@icloud.com&limit=20&days=7
 响应中 `"method": "imap"` 或 `"method": "web_api"` 标识实际使用的读取方式。
 
 **别名过滤逻辑:**
-- **IMAP (`FindByRecipient`):** 先用原生 IMAP `TO` 头搜索 (配合 `days` 时间范围);无结果时拉取最近 `limit*3` 条本地按 `To` 兜底过滤
-- **Web API (`FindByAlias`):** iCloud Web API 不支持按收件人搜索,拉取 `limit*2` (至少 50) 条后本地对 `Subject`/`From`/`To` 做包含匹配
+- **IMAP (`FindByRecipient`):** 先用原生 IMAP `TO` 头搜索 (配合 `days` 时间范围);无结果时退回拉信封本地按 `To` 兜底过滤
+- **Web API (`FindByAlias`):** iCloud Web API 不支持按收件人搜索,拉取 `(offset+limit)*3` (至少 50) 条后本地对 `Subject`/`From`/`To` 做包含匹配
+
+**IMAP 分两阶段取:** 先只拉信封 (`UID`/`ENVELOPE`/`INTERNALDATE`) 把各邮箱的邮件
+排序、算总数、切出当前页,再单独去取这一页的完整正文。正文是最贵的一步 (营销邮件
+动辄几百 KB),不这么分的话翻第 1 页也得把几百封信的正文全下载一遍。
 
 **返回字段差异 (两条路径):**
 - `id` — IMAP 是 UID 数字串,Web API 是 iCloud GUID。IMAP 的 UID 只在单个邮箱内唯一,
